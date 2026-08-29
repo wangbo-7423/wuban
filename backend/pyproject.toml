@@ -1,0 +1,40 @@
+[project]
+name = "ai-tutor-backend"
+version = "0.2.0"
+description = "AI 伴学 · 后端（GLM 5.3 Flash Agent + Postgres）"
+readme = "README.md"
+requires-python = ">=3.13"
+
+dependencies = [
+    # Web 框架
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.52.4",
+    "python-multipart>=0.0.20",       # 文件上传（UploadFile / Form）
+    # 数据
+    "sqlalchemy>=2.0.52",
+    "psycopg2-binary>=2.9.12",
+    # 配置
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.15.0",
+    "python-dotenv>=1.0.0",            # 显式声明：pydantic-settings 读 .env 的底层依赖（之前是隐式传递依赖）
+    # 鉴权
+    "pyjwt>=2.13.0",
+    "bcrypt>=5.0.0",
+    # 符号计算（sympy_calc 工具：积分/求导/极限/解方程/线代）
+    "sympy>=1.13.0",
+    # 大模型（智谱 AI GLM 5.3 Flash）
+    "zai-sdk>=0.2.3",
+    "mcp>=2.1.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",       # 单测（tests/）
+]
+search = [
+    "ddgs>=9.0",         # web_search 的多引擎后端（零 API key；也可改配 TAVILY_API_KEY）
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

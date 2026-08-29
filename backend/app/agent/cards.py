@@ -1,0 +1,228 @@
+"""把 Agent 最终回答 + 工具结果，格式化成一~多张 CardMessage（结构化输出）。
+
+设计：
+- 主 Agent 循环（orchestrator）只负责「思考 + 调工具 + 产出最终文本」；
+- 本模块是独立的一步：用 GLM 的 JSON mode 把上述文本切成符合卡片协议的 CardMessage[]；
+- 失败（解析/校验不过）则回退到单张 text/understand 卡，绝不破坏主流程。
+
+这一步是「激活前端 5 个死组件（MathCard / EngineeringCard / PracticeCard /
+ChoiceCard / RecommendationCard）」的关键：只要 GLM 在此打出对应 card_type +
+正确 payload，前端已有组件即可渲染。
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+import uuid
+from datetime import datetime, timezone
+from typing import Any
+
+from app.agent import glm_client
+from app.agent.orchestrator import AgentResult
+from app.schemas.card import CardMessage, CardPayload
+
+logger = logging.getLogger(__name__)
+
+_FORMAT_SYSTEM = """你是「AI 伴学」的卡片格式化器。下面会给你一段助手的回答原文，以及它调用过的工具结果摘要。
+请把这段回答拆成 1~3 张结构化卡片（CardMessage），供前端渲染。
+
+# 卡片类型（只能选这些）
+text / question / understand / math / engineering / practice / choice / recommendation / feedback / evidence / progress / warning / metacog / motivation / scaffold_progress / tool_call
+
+# 切卡规则
+- 含数学推导（公式/积分/极限/矩阵）→ 用 `math` 卡，payload.math={problem, steps:[{expr,note}], answer, unit}；expr 用 LaTeX，如 "\\frac{a}{b}"、"\\int_0^1 x^2 dx"。
+- 含工程实操步骤（命令/注意事项）→ 用 `engineering` 卡，payload.engineering_steps=[{title, command, expected, pitfalls, next_step_hint}]。
+- 学生贴了代码、你用 code_runner 跑过 → 用 `feedback` 卡给审阅式反馈（先肯定、再指出可改处并说明原因、不打分）；若 code_runner 生成了图表 URL，把 url 列表放进 payload.engineering_artifacts=[{type:"image", url:"..."}]，让学生直接看到运行结果图。
+- 你用 project_guide 提议了微项目 → 用 `recommendation` 卡，payload.options=[{value, label}]，label 写项目名称+耗时，reason 写为什么适合。
+- 出了练习题（题干 + 可作答）→ 用 `practice` 卡，payload.stem 写题干，payload.max_hints 给 1~3。
+- 概念辨析 / 反例选择题 → 用 `choice` 卡，payload.options=[{value, label}]。
+- 推荐下一步学习资源/路径 → 用 `recommendation` 卡，payload.options=[{value, label}]，reason 写理由。
+- 反问学生（先问再答）→ 用 `question` 卡。
+- 普通解释/过渡 → `understand` 或 `text`。
+- 其余（反馈/元认知/警告等）按语义选。
+
+# 输出格式（严格 JSON，不要多余文字）
+{
+  "cards": [
+    {
+      "card_type": "math",
+      "text": "这张卡的完整正文（Markdown）",
+      "payload": { "math": { "problem": "...", "steps": [{"expr":"...","note":"..."}], "answer":"...", "unit":"..." } },
+      "strategy": ["分解", "可视化"],
+      "scaffold_level": "faded",
+      "gave_answer": false,
+      "confidence": 0.9
+    }
+  ]
+}
+
+规则：
+- `text` 是卡的完整正文，必须保留回答原文里的实质内容（解释、定义、对比表格、列表、推导），用 Markdown 写：表格用 | 分隔的 Markdown 表格，公式用 $...$ 或 $$...$$，前端会渲染。不要只写一句引导语——引导语之后必须跟正文，丢了正文学生就看不到讲解。
+- 只有 math/engineering 卡的细节放 payload 对应结构化字段（此时 text 仍是引导语+说明）；其余卡片类型的全部内容都放 text。
+- scaffold_level 只能取：example / faded / hint / independent。
+- 不要编造工具没给出的数据；math/engineering 卡的字段必须来自回答原文或工具结果。
+- 第一张卡通常是主卡；其余是补充（练习/反问/推荐）。
+- 如果整段就是普通解释，返回单张 understand 卡即可，不要硬切。
+"""
+
+_VALID_TYPES = {
+    "text", "question", "understand", "math", "engineering", "practice",
+    "choice", "recommendation", "feedback", "evidence", "progress", "warning",
+    "metacog", "motivation", "scaffold_progress", "tool_call",
+}
+
+
+def _summarize_tools(result: AgentResult) -> str:
+    if not result.tool_calls:
+        return "（无工具调用）"
+    lines: list[str] = []
+    for tc in result.tool_calls:
+        r = tc.get("result") or {}
+        ok = tc.get("ok")
+        name = tc.get("tool_name")
+        if not isinstance(r, dict):
+            lines.append(f"- {name} (ok={ok}): {str(r)[:200]}")
+            continue
+
+        if name == "code_runner":
+            # 代码执行结果：把输出/报错/退出码/图表都给到格式化器
+            figs = r.get("figures") or []
+            fig_note = f"；生成图表 {len(figs)} 张: " + ", ".join(
+                f["url"] for f in figs
+            ) if figs else ""
+            lines.append(
+                f"- code_runner (ok={ok}, returncode={r.get('returncode')}, "
+                f"timed_out={r.get('timed_out')}):\n"
+                f"  stdout:\n{(r.get('stdout') or '(空)')[:1500]}\n"
+                f"  stderr:\n{(r.get('stderr') or '(空)')[:800]}{fig_note}"
+            )
+        elif name == "project_guide":
+            if r.get("matched"):
+                opts = r.get("options") or []
+                opt_note = "; ".join(
+                    f"{o.get('title')}({o.get('minutes')}min)" for o in opts
+                )
+                lines.append(
+                    f"- project_guide (ok={ok}, topic={r.get('topic')}): 选项={opt_note}"
+                )
+            else:
+                sugg = [s.get("name") for s in (r.get("suggestions") or [])]
+                lines.append(
+                    f"- project_guide (ok={ok}, 未命中): 可提议={sugg}"
+                )
+        else:
+            brief = str(
+                r.get("value") or r.get("matched") or r.get("latex")
+                or r.get("error") or ""
+            )[:200]
+            lines.append(f"- {name} (ok={ok}): {brief}")
+    return "\n".join(lines)
+
+
+def _extract_json(text: str) -> dict[str, Any]:
+    """从 GLM 输出里抽出 JSON 对象（兼容 ```json 围栏与裸 JSON）。"""
+    t = (text or "").strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```[a-zA-Z]*\n?", "", t)
+        t = re.sub(r"\n?```$", "", t).strip()
+    return json.loads(t)
+
+
+def format_cards(
+    result: AgentResult, *, user_text: str, course_id: str
+) -> list[CardMessage]:
+    """把 AgentResult 格式化成 1~3 张 CardMessage。失败回退单卡。"""
+    prompt = (
+        f"课程：{course_id}\n"
+        f"学生问题：{user_text}\n\n"
+        f"助手回答原文：\n{result.text}\n\n"
+        f"工具调用摘要：\n{_summarize_tools(result)}"
+    )
+    try:
+        resp = glm_client.chat(
+            messages=[
+                {"role": "system", "content": _FORMAT_SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+            enable_thinking=False,
+            temperature=0.2,
+        )
+        content = resp.choices[0].message.content or ""
+        data = _extract_json(content)
+        cards_raw = data.get("cards") or []
+        cards = [_parse_card(c) for c in cards_raw]
+        cards = [c for c in cards if c is not None]
+        if cards:
+            return cards
+    except Exception as e:  # noqa: BLE001
+        logger.warning("format_cards 失败，回退单卡: %s", e)
+    return [_fallback_card(result)]
+
+
+_VALID_SCAFFOLD = {"example", "faded", "hint", "independent"}
+_VALID_NEXT_ACTION = {"accept", "adjust", "reject", "retry", "ask", "none"}
+
+
+def _parse_card(c: dict[str, Any]) -> CardMessage | None:
+    try:
+        card_type = c.get("card_type") or "text"
+        if card_type not in _VALID_TYPES:
+            card_type = "text"
+        payload = c.get("payload")
+        payload_obj = CardPayload(**payload) if isinstance(payload, dict) else None
+        # 模型偶尔会输出协议外的枚举值（如 scaffold_level="open"）；
+        # 直接校验会丢弃整卡（含正文/表格），这里清洗为 None 保卡不保字段。
+        scaffold = c.get("scaffold_level")
+        if scaffold not in _VALID_SCAFFOLD:
+            scaffold = None
+        next_action = c.get("next_action")
+        if next_action not in _VALID_NEXT_ACTION:
+            next_action = None
+        confidence = c.get("confidence")
+        if isinstance(confidence, (int, float)) and not 0 <= confidence <= 1:
+            confidence = None
+        evidence = c.get("evidence")
+        if isinstance(evidence, list):
+            evidence = [e for e in evidence if isinstance(e, dict) and e.get("source")] or None
+        else:
+            evidence = None
+        return CardMessage(
+            id=str(uuid.uuid4()),
+            role="assistant",
+            card_type=card_type,
+            text=c.get("text") or "",
+            payload=payload_obj,
+            evidence=evidence,
+            confidence=confidence,
+            gave_answer=c.get("gave_answer"),
+            scaffold_level=scaffold,
+            reason=c.get("reason"),
+            next_action=next_action,
+            strategy=c.get("strategy"),
+            created_at=datetime.now(timezone.utc),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("单卡解析失败，跳过: %s", e)
+        return None
+
+
+def _fallback_card(result: AgentResult) -> CardMessage:
+    """GLM 切卡失败时的最低保障：用简单启发保留一条可读卡片。"""
+    text = result.text or ""
+    ct = "text"
+    if "？" in text or "?" in text:
+        ct = "question"
+    elif any(k in text for k in ("第一步", "第二步", "步骤")) or "\n" in text:
+        ct = "understand"
+    return CardMessage(
+        id=str(uuid.uuid4()),
+        role="assistant",
+        card_type=ct,
+        text=text,
+        payload=CardPayload(meta={"thinking_chars": len(result.thinking)}),
+        thinking=result.thinking or None,
+        created_at=datetime.now(timezone.utc),
+        next_action="ask",
+    )

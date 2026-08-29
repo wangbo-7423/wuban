@@ -1,0 +1,30 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local dev database
+*.db
+*.sqlite3
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+
+# Docker
+.docker-data/
+
+# Local data
+data/
+*.log
+
+
+# MCP server 本地依赖（package.json/lock 保留，node_modules 忽略）
+mcp_servers/node_modules/

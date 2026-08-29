@@ -1,0 +1,29 @@
+# ── 密钥与本地配置（永远不入库）─────────────────────────
+.env
+*.env.local
+backend/.env
+
+# ── Python ───────────────────────────────────────────────
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+backend/.venv/
+
+# ── Node / 前端 ──────────────────────────────────────────
+node_modules/
+frontend/node_modules/
+frontend/dist/
+*.log
+frontend/npm_*.log
+
+# ── 运行时数据（上传图片 / 每用户记忆图谱）──────────────
+backend/uploads-image/
+backend/data/memory/
+
+# ── 编辑器 / 系统 ────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.workbuddy/

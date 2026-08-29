@@ -1,0 +1,28 @@
+# Docker Compose：本地起 PostgreSQL（AI 伴学后端依赖）
+# 用法：在 backend/ 目录下执行
+#   docker compose -f docker-compose.yml up -d
+# 数据卷命名为 aitutor_pg_data，重启不丢
+# 默认端口 5433；若 5433 也占用，改下面的 ports 让出去。
+# 注意 .env 里的 DATABASE_URL 要与这里端口保持一致。
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: aitutor-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aitutor
+      POSTGRES_PASSWORD: aitutor
+      POSTGRES_DB: aitutor
+    ports:
+      - "5433:5432"
+    volumes:
+      - aitutor_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aitutor -d aitutor"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  aitutor_pg_data:
