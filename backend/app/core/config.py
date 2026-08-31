@@ -53,10 +53,13 @@ class Settings(BaseSettings):
     glm_api_key: str = Field(..., description="智谱 AI 的 API Key")
     glm_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
     glm_model: str = "glm-5.3-flash"
-    glm_timeout_sec: float = 60.0
+    glm_timeout_sec: float = 90.0  # 覆盖 429 排队窗口的 60~90s 等待
     glm_enable_thinking: bool = True
     glm_max_tokens: int = 4096
     glm_temperature: float = 0.7
+    # 限流/超时重试：指数退避，仅在可重试错误（429 / 超时）上生效
+    glm_rate_limit_retries: int = 2
+    glm_rate_limit_backoff_sec: float = 3.0
 
     # ── 跨域 ───────────────────────────────────────────────
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])

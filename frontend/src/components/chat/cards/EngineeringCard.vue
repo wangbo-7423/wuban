@@ -8,11 +8,13 @@ import { computed } from 'vue'
 import type { CardMessage } from '@/api/types'
 import { renderRich } from '@/utils/render'
 import EvidenceChips from '@/components/learn/EvidenceChips.vue'
+import ArtifactGallery from './ArtifactGallery.vue'
 
 const props = defineProps<{ msg: CardMessage }>()
 const steps = computed(
   () => props.msg.payload?.engineering_steps || [],
 )
+const artifacts = computed(() => props.msg.payload?.engineering_artifacts || [])
 async function copyCmd(text: string) {
   try {
     await navigator.clipboard.writeText(text)
@@ -43,6 +45,8 @@ async function copyCmd(text: string) {
         <p v-if="s.next_step_hint" class="next">{{ s.next_step_hint }}</p>
       </li>
     </ol>
+
+    <ArtifactGallery v-if="artifacts.length" :artifacts="artifacts" />
 
     <EvidenceChips
       v-if="props.msg.evidence?.length"

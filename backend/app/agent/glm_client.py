@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import logging
+import random
+import time
 from typing import Any, Iterable, Iterator
 
 from zai import ZhipuAiClient
@@ -134,11 +136,48 @@ def chat(
     else:
         kwargs["max_tokens"] = settings.glm_max_tokens
 
-    try:
-        return get_client().chat.completions.create(**kwargs)
-    except Exception as e:  # noqa: BLE001
-        logger.exception("GLM 调用失败: %s", e)
-        raise GLMUnavailable() from e
+    # ── 限流/超时重试：指数退避 ──────────────────────────
+    # 背景：GLM 429 时请求会在服务端排队 60~90s，SDK 超时后抛 APITimeoutError。
+    # 这类错误是暂时性的，值得重试；其他错误（鉴权、参数）重试无意义。
+    max_attempts = 1 + max(0, settings.glm_rate_limit_retries)
+    last_exc: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            return get_client().chat.completions.create(**kwargs)
+        except Exception as e:  # noqa: BLE001
+            last_exc = e
+            retryable = _is_retryable(e)
+            if not retryable or attempt >= max_attempts - 1:
+                break
+            delay = settings.glm_rate_limit_backoff_sec * (2**attempt) + random.uniform(0, 1)
+            logger.warning(
+                "GLM 调用暂时失败（第 %d/%d 次，%s），%.1fs 后重试: %s",
+                attempt + 1,
+                max_attempts,
+                type(e).__name__,
+                delay,
+                e,
+            )
+            time.sleep(delay)
+    logger.exception("GLM 调用失败: %s", last_exc)
+    raise GLMUnavailable() from last_exc
+
+
+def _is_retryable(e: Exception) -> bool:
+    """判断异常是否值得重试：429 限流 / 超时 / 连接中断。"""
+    # SDK 异常可能带 status_code / code 属性
+    status = getattr(e, "status_code", None) or getattr(e, "code", None)
+    if status in (429, "429"):
+        return True
+    name = type(e).__name__.lower()
+    text = str(e).lower()
+    if "timeout" in name or "timed out" in text or "timeout" in text:
+        return True
+    if "connection" in name or "connection" in text or "eof" in text:
+        return True
+    if "429" in text or "rate limit" in text or "请求过多" in str(e) or "排队" in str(e):
+        return True
+    return False
 
 
 # ────────────────────────────────────────────────────────────

@@ -141,6 +141,13 @@ export interface EngineeringStep {
   next_step_hint?: string | null
 }
 
+/** code_runner 运行产物（图片 / 文件），URL 为后端静态路由（如 /api/uploads-image/code-run/.../fig_0.png） */
+export interface EngineeringArtifact {
+  type?: string | null
+  url?: string | null
+  name?: string | null
+}
+
 export interface CardPayload {
   options?: Record<string, unknown>[]
   stem?: string | null
@@ -148,7 +155,7 @@ export interface CardPayload {
   max_hints?: number | null
   math?: MathBlock | null
   engineering_steps?: EngineeringStep[]
-  engineering_artifacts?: Record<string, unknown>[]
+  engineering_artifacts?: EngineeringArtifact[]
   mastery?: Record<string, number>
   risk?: Record<string, unknown>[]
   meta?: Record<string, unknown>
