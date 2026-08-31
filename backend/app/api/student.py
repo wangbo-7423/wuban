@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from app.agent import AgentOrchestrator, AgentResult, tool_schemas
 from app.agent import glm_client
 from app.agent.cards import format_cards
-from app.core.db import get_session, SessionLocal
+from app.core.db import get_session
 from app.core.errors import BizError, ErrorCode
 from app.core.response import ok
 from app.core.security import get_current_user
@@ -232,15 +232,30 @@ def _memory_context(user_id: str, user_text: str) -> str:
     return "\n\n".join(parts)
 
 
+def _build_updated_context(db: Session, user_id: str, course_id: str) -> dict | None:
+    """重算 cognitive_state 并折算成前端 LearningContext（updated_context 契约）。
+
+    在卡片落库、commit 之后同步调用（本轮的 kg_lookup 命中要算进 mentions）；
+    update_cognitive_state 内部全量兜异常，失败返回 None，前端静默保留旧 context。
+    """
+    from app.services import profile_service
+    state = profile_service.update_cognitive_state(db, user_id)
+    if state is None:
+        return None
+    return profile_service.build_learning_context(state, course_id)
+
+
 def _after_chat_tasks(
     user_id: str, course_id: str, user_text: str, assistant_text: str,
     conversation_id: str | None = None,
 ) -> None:
     """轮后任务（FastAPI BackgroundTasks，独立线程跑）：
     1) 从本轮对话抽取实体/关系写入记忆图谱（长期记忆层 Write）；
-    2) 更新会话草稿纸 + 视情况压缩滚动摘要（会话级 Write）；
-    3) 重算 cognitive_state 回推画像。
-    全部各自兜异常——任何一路挂了都不能影响下一次聊天。
+    2) 更新会话草稿纸 + 视情况压缩滚动摘要（会话级 Write）。
+
+    画像回推（cognitive_state）已改为请求路径内同步重算——它要喂给
+    ChatOut.updated_context 随响应下发；全部各自兜异常，任何一路挂了
+    都不能影响下一次聊天。
     """
     try:
         from app.services import memory_service
@@ -253,14 +268,6 @@ def _after_chat_tasks(
             session_memory.after_turn(conversation_id)
         except Exception:  # noqa: BLE001
             pass
-    db = SessionLocal()
-    try:
-        from app.services import profile_service
-        profile_service.update_cognitive_state(db, user_id)
-    except Exception:  # noqa: BLE001
-        pass
-    finally:
-        db.close()
 
 
 # ────────────────────────────────────────────────────────────
@@ -377,14 +384,18 @@ def _chat_impl(payload: ChatIn, user: User, db: Session) -> dict:
         conv.title = payload.message[:16]
     db.commit()
 
-    # 7) 轮后任务：记忆抽取 + 画像回推（后台线程，不拖慢回包；失败静默）
+    # 7) 画像回推 + 学习上下文：卡片已落库，本轮证据算得进 mentions；
+    #    失败静默（updated_context 留 null，前端保留旧 context）
+    updated_context = _build_updated_context(db, user.id, payload.course_id)
+
+    # 8) 轮后任务（后台线程）：记忆抽取 + 会话记忆（画像回推已在上面同步做）
     bg = BackgroundTasks()
     bg.add_task(
         _after_chat_tasks, user.id, payload.course_id, payload.message,
         main_card.text or "", conv.id,
     )
 
-    # 8) 回包（主卡 + extras 多卡）
+    # 9) 回包（主卡 + extras 多卡）
     chat_out = ChatOut(
         message=main_card.model_dump(),
         extras=[e.model_dump() for e in extra_cards],
@@ -392,6 +403,7 @@ def _chat_impl(payload: ChatIn, user: User, db: Session) -> dict:
         tool_calls=[tc.model_dump() if hasattr(tc, "model_dump") else tc for tc in main_card.tool_calls or []],
         conversation_id=conv.id,
         title=conv.title,
+        updated_context=updated_context,
     )
     # JSONResponse + background：响应送达后 FastAPI 会在同一线程池跑轮后任务。
     # 卡片里的 created_at 是 datetime，JSONResponse 不做类型转换，先过 jsonable_encoder。
@@ -430,7 +442,8 @@ def chat_stream(
     - `reasoning` 思考链增量 {delta}（GLM thinking 模式）；
     - `tool`      工具开始执行 {tool_name, args}（前端可显示轨迹）；
     - `delta`     回答正文增量 {text}；
-    - `done`      完整 ChatOut（主卡 + extras 已切好、已落库），前端用它替换流式占位；
+    - `done`      完整 ChatOut（主卡 + extras 已切好、已落库，updated_context 已回推），
+                  前端用它替换流式占位；
     - `error`     失败 {code, message}（错误卡已落库，刷新不丢上下文）。
 
     卡片切分（format_cards 二次 LLM 调用）在流结束后进行——结构化卡片
@@ -486,6 +499,8 @@ def chat_stream(
                 ],
                 conversation_id=conv.id,
                 title=conv.title,
+                # 卡片已落库后重算画像（失败静默，留 null 前端保留旧 context）
+                updated_context=_build_updated_context(db, user.id, payload.course_id),
             )
             yield _sse("done", {"data": chat_out.model_dump(mode="json")})
         except BizError as e:
@@ -769,6 +784,23 @@ _OPEN_THREAD_MARKS = (
     "你有没有想过", "有没有想过", "你想过", "不妨想想", "不妨思考",
     "试想", "你会怎么", "留给你", "可以想想",
 )
+
+
+@router.get("/context")
+def learning_context(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> dict:
+    """学习上下文（前端 LearningContext）：路径 / 探索深度 / 复习到期。
+
+    与 ChatOut.updated_context 同一份数据形状（build_learning_context）：
+    - 进入主界面时拉一次（顶栏进度、侧栏「我的路径」「该回顾了」的首次数据源）；
+    - 练习提交等不带回推的入口之后，前端可再调它刷新。
+    内部会顺带重算 cognitive_state（无消息记录时返回空上下文，不报错）。
+    """
+    from app.services import profile_service
+    state = profile_service.update_cognitive_state(db, user.id)
+    return ok(profile_service.build_learning_context(state, "general"))
 
 
 @router.get("/exploration")

@@ -9,12 +9,14 @@
 cognitive_state JSON 结构（docs/04 与本文件为真源）：
 {
   "topics": { "<概念名>": {"mentions": int, "course": str, "last_seen": iso,
-                            "status": "exploring | deepening | to_review"} },
+                            "status": "exploring | deepening | to_review",
+                            "review": {"interval_days": int, "due": iso} | 无} },
   "misconceptions": ["..."],            # 记忆图谱里的误区实体
   "preferences": ["..."],               # 偏好实体
   "scaffolding": {"gave_answer_ratio": float, "recent_scaffold_level": str | null},
   "cognitive_load": "low | medium | high",
-  "review_queue": [{"topic": str, "reason": str}],
+  "review_queue": [{"topic": str, "course": str, "reason": str,
+                    "due": iso, "overdue_days": int}],
   "updated_at": iso
 }
 """
@@ -32,7 +34,8 @@ from app.repositories import learning_repo
 
 logger = logging.getLogger(__name__)
 
-_REVIEW_AFTER_DAYS = 7
+_REVIEW_START_DAYS = 2  # 首次接触 → 2 天后安排回顾
+_REVIEW_MAX_INTERVAL = 60  # 间隔封顶（天）
 _RECENT_FOR_SCAFFOLD = 20
 
 # 追问信号（与 student.py 探索档案同源的简化版）：衡量「正在较劲」的程度
@@ -53,6 +56,12 @@ def update_cognitive_state(db: Session, user_id: str) -> dict[str, Any] | None:
 
 
 def compute_cognitive_state(db: Session, user_id: str) -> dict[str, Any] | None:
+    profile_row = learning_repo.get_profile_by_user(db, user_id)
+    prev_state: dict[str, Any] = (
+        (profile_row.cognitive_state or {}) if profile_row else {}
+    )
+    prev_topics: dict[str, Any] = prev_state.get("topics") or {}
+
     rows = (
         db.query(Message, Conversation.course_id)
         .join(Conversation, Message.conversation_id == Conversation.id)
@@ -101,19 +110,21 @@ def compute_cognitive_state(db: Session, user_id: str) -> dict[str, Any] | None:
     if not topics:
         return None
 
-    # ── 主题状态 + 复习队列 ───────────────────────────────
-    review_queue: list[dict[str, str]] = []
+    # ── 主题状态 + 复习队列（SM-2-lite：间隔随重新提起翻倍，到期进队列）──
+    review_queue: list[dict[str, Any]] = []
     for name, t in topics.items():
         last_dt = t.pop("_last_dt", None)
         t["last_seen"] = last_dt.isoformat() if last_dt else None
-        if last_dt is None or (now - last_dt.replace(tzinfo=timezone.utc)).days >= _REVIEW_AFTER_DAYS:
-            t["status"] = "to_review"
-            if t["mentions"] >= 1:
-                review_queue.append({"topic": name, "reason": "超过一周没碰过了"})
-        elif t["mentions"] <= 1:
-            t["status"] = "exploring"
-        else:
-            t["status"] = "deepening"
+        status, review, queue_entry = _schedule_review(
+            prev_topics.get(name), last_dt, now, t["mentions"]
+        )
+        t["status"] = status
+        if review:
+            t["review"] = review
+        if queue_entry:
+            queue_entry["course"] = t["course"]
+            review_queue.append(queue_entry)
+    review_queue.sort(key=lambda e: -e.get("overdue_days", 0))
     review_queue = review_queue[:8]
 
     # ── 脚手架结构：AI 直接给答案的比例（越低越符合产品定位）────
@@ -166,6 +177,136 @@ def compute_cognitive_state(db: Session, user_id: str) -> dict[str, Any] | None:
 
 
 # ── 内部 ─────────────────────────────────────────────────
+
+
+def _schedule_review(
+    prev: dict[str, Any] | None,
+    last_dt: datetime | None,
+    now: datetime,
+    mentions: int,
+) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
+    """间隔复习调度（SM-2-lite，纯函数、可单测、不打分）。
+
+    - 首次接触：2 天后安排回顾；之后每重新提起一次，间隔翻倍（封顶 60 天）
+      ——「记得越牢，下次回顾隔得越久」的检索练习节奏；
+    - 上一轮排期已到期还没再碰 → to_review，进复习队列（按超期天数排序消费）；
+    - 只有 kg_lookup 命中才带时间（last_dt），纯图谱实体没有时间轴，沿用旧状态不排期。
+
+    返回 (status, topics[name].review, review_queue 条目或 None)。
+    """
+    if last_dt is None:
+        prev_review = (prev or {}).get("review")
+        return (prev or {}).get("status") or "exploring", prev_review, None
+
+    last_dt = last_dt.replace(tzinfo=timezone.utc)
+    prev_review = (prev or {}).get("review") or {}
+    try:
+        interval = int(prev_review.get("interval_days") or 0)
+    except (TypeError, ValueError):
+        interval = 0
+    prev_last = (prev or {}).get("last_seen")
+    try:
+        prev_last_dt = datetime.fromisoformat(prev_last) if prev_last else None
+    except (TypeError, ValueError):
+        prev_last_dt = None
+    if prev_last_dt is None:
+        re_engaged = True  # 无历史时间视为首见
+    else:
+        re_engaged = last_dt > prev_last_dt.replace(tzinfo=timezone.utc)
+
+    if re_engaged:
+        interval = min(interval * 2 if interval else _REVIEW_START_DAYS,
+                       _REVIEW_MAX_INTERVAL)
+    if interval <= 0:
+        interval = _REVIEW_START_DAYS
+
+    due = last_dt + timedelta(days=interval)
+    review = {"interval_days": interval, "due": due.isoformat()}
+    days_since = (now - last_dt).days
+
+    if now >= due:
+        overdue_days = max(0, days_since - interval)
+        entry = {
+            "topic": "",
+            "reason": f"已经 {days_since} 天没碰了，安排一次回顾吧",
+            "due": due.isoformat(),
+            "overdue_days": overdue_days,
+        }
+        status = "to_review"
+    else:
+        status = "exploring" if mentions <= 1 else "deepening"
+        entry = None
+    return status, review, entry
+
+
+def build_learning_context(state: dict[str, Any] | None, course_id: str = "general") -> dict[str, Any]:
+    """把 cognitive_state 折算成前端 LearningContext（docs/02 §updated_context 契约）。
+
+    注意措辞红线（docs/00 §6）：`mastery` 字段名是前端既有契约，语义是
+    「过程性探索深度估计值」（同 /exploration 的 depth），不是考试分数。
+    """
+    course_name = _course_name(course_id)
+    if not state:
+        return {
+            "course": {"id": course_id, "name": course_name, "subject": course_name, "goal": ""},
+            "path": [],
+            "mastery": {},
+            "review_due": [],
+            "cognitive": {},
+        }
+
+    topics: dict[str, Any] = state.get("topics") or {}
+    ranked = sorted(
+        topics.items(), key=lambda kv: -(kv[1].get("mentions") or 0)
+    )[:10]
+
+    path: list[dict[str, Any]] = []
+    mastery: dict[str, float] = {}
+    for name, t in ranked:
+        depth = round(min(1.0, 0.3 + (t.get("mentions") or 0) * 0.15), 2)
+        path.append({
+            "node": name,
+            "status": t.get("status") or "exploring",
+            "mastery": depth,
+            "reason": f"聊过 {t.get('mentions') or 0} 次",
+        })
+        mastery[name] = depth
+
+    review_due = [
+        {
+            "kc": e.get("topic") or "",
+            "due": e.get("due") or "",
+            "course": e.get("course") or "general",
+            "reason": e.get("reason") or "",
+            "overdue_days": e.get("overdue_days") or 0,
+        }
+        for e in (state.get("review_queue") or [])
+        if e.get("topic")
+    ]
+
+    cognitive: dict[str, Any] = {}
+    if state.get("cognitive_load"):
+        cognitive["load"] = state["cognitive_load"]
+
+    return {
+        "course": {"id": course_id, "name": course_name, "subject": course_name, "goal": ""},
+        "path": path,
+        "mastery": mastery,
+        "review_due": review_due,
+        "cognitive": cognitive,
+    }
+
+
+def _course_name(course_id: str) -> str:
+    """course_id → 中文名（KG 注册表里有就用它，没有退回原值）。"""
+    try:
+        from app.kg import COURSES
+        cls = COURSES.get(course_id)
+        if cls is not None:
+            return getattr(cls, "course_name", None) or course_id
+    except Exception:  # noqa: BLE001
+        pass
+    return "综合学习" if course_id == "general" else course_id
 
 
 def _graph_topics(user_id: str) -> dict[str, dict[str, Any]]:

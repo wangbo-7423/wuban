@@ -268,7 +268,7 @@ Pydantic 校验失败时，`data.error` 为 **字段 → 错误列表** 的映�
 | `tool_calls` | `ToolCallRecord[]` | 否（`[]`） | 本次调用的工具及结果摘要（与 `message.tool_calls` 同源） |
 | `conversation_id` | `string` | 否 | 会话 id（新建时前端要更新本地状态） |
 | `title` | `string \| null` | 是 | 会话标题（刷新列表用） |
-| `updated_context` | `object \| null` | 是 | 学习上下文回推（掌握度/路径/复习，**预留**，当前 null；前端已有合并逻辑） |
+| `updated_context` | `object \| null` | 是 | 学习上下文回推 `{course, path, mastery, review_due, cognitive}`，卡片落库后重算 `cognitive_state` 折算生成（与 §4.1c `GET /student/context` 同形状）；重算失败为 null，前端保留旧 context。**`mastery` 语义是「过程性探索深度估计值」，不是考试分数**（docs/00 §6 红线） |
 
 主卡片由后端 `format_cards()`（GLM JSON mode 二次切卡）产出，失败时回退启发式单卡：含「？」→`question`；含步骤词/多行→`understand`；否则 `text`；`payload.meta.thinking_chars` 记录思维链长度；`next_action="ask"`。结构化 `math`/`engineering` 卡片协议见 03。
 
@@ -292,7 +292,19 @@ Pydantic 校验失败时，`data.error` 为 **字段 → 错误列表** 的映�
     "tool_calls": [ /* 同上 */ ],
     "conversation_id": "7c9e…-…",
     "title": "这道积分怎么算？",
-    "updated_context": null
+    "updated_context": {
+      "course": {"id": "signals", "name": "信号与系统", "subject": "信号与系统", "goal": ""},
+      "path": [
+        {"node": "傅里叶变换", "status": "deepening", "mastery": 1.0, "reason": "聊过 5 次"},
+        {"node": "采样定理", "status": "exploring", "mastery": 0.45, "reason": "聊过 1 次"}
+      ],
+      "mastery": {"傅里叶变换": 1.0, "采样定理": 0.45},
+      "review_due": [
+        {"kc": "采样定理", "due": "2026-08-29T09:00:00+00:00", "course": "signals",
+         "reason": "已经 9 天没碰了，安排一次回顾吧", "overdue_days": 7}
+      ],
+      "cognitive": {"load": "medium"}
+    }
   }
 }
 ```
@@ -340,6 +352,25 @@ Pydantic 校验失败时，`data.error` 为 **字段 → 错误列表** 的映�
 | `feedback` | `CardMessage` | assistant 审阅反馈卡（`card_type="feedback"`，前端 push 上屏） |
 
 **错误**：`400 该卡片不是可作答的练习/选择卡 / 作答内容不能为空`；`404 会话不存在或无权访问 / 卡片不存在`。
+
+### 4.1c GET `/api/student/context`（需登录）— 学习上下文（路径 / 探索深度 / 复习到期）
+
+与 `ChatOut.updated_context` 同一份数据形状（后端 `build_learning_context(cognitive_state)` 折算）。用途：
+
+- 进入学习主界面时拉一次（顶栏进度/复习到期、侧栏「我的路径」「该回顾了」的首次数据源）；
+- 练习提交等不带回推的入口之后，前端可再调它刷新。
+
+内部会顺带重算 `cognitive_state`（无消息记录时返回空上下文，不报错）。复习闭环交互约定：侧栏「该回顾了」列表项由前端一键发起**回忆式复习会话**——新建会话并以学生口吻发出种子消息（「先别直接讲结论，抛引导问题让我自己回忆」），AI 按 Agent.md 的检索练习规则引导，不判分。
+
+**响应 `data`**：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `course` | `{id, name, subject, goal}` | 当前课程（name 由 KG 注册表解析，未注册退回 course_id） |
+| `path` | `{node, status, mastery, reason}[]` | 按 mentions 排序的前 10 个主题；`status ∈ exploring / deepening / to_review`；`mastery` = 探索深度估计值 `min(1, 0.3 + mentions×0.15)` |
+| `mastery` | `Record<string, number>` | 同 path 的深度估计值（顶栏「进度」= 各主题均值） |
+| `review_due` | `{kc, due, course, reason, overdue_days}[]` | 到期主题（SM-2-lite 间隔复习队列，按超期天数降序，最多 8 条）；前端点击即发起复习会话 |
+| `cognitive` | `{load?}` | 认知负荷粗估 `low / medium / high`（追问密度），无证据时为 `{}` |
 
 ### 4.2 GET `/api/student/conversations`（需登录）
 

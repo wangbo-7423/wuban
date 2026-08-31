@@ -58,8 +58,8 @@
           else: 执行每个工具 → 结果 JSON 序列化(≤4000字符) 以 role="tool" 回填 → 继续
   → 结果装成主卡片 CardMessage（启发式选 text/question/understand）
       带上 thinking、tool_calls 留痕 → 落库 → 更新会话 updated_at
-  → 返回 ChatOut（message / extras / thinking / tool_calls / conversation_id / title）
-  → 前端 CardRenderer 按 card_type 渲染；learn store 合并 updated_context（预留）
+  → 返回 ChatOut（message / extras / thinking / tool_calls / conversation_id / title / updated_context）
+  → 前端 CardRenderer 按 card_type 渲染；learn store 用 updated_context 刷新侧栏与顶栏进度
 ```
 
 要点：
@@ -195,7 +195,8 @@ class KnowledgeGraph(Protocol):
 | 扩展 | 现状 | 预留位 |
 | --- | --- | --- |
 | SSE 流式对话 | **已实现**：`POST /api/student/chat/stream` 推 `reasoning/tool/delta` 增量，`done` 下发切好卡片的完整 ChatOut（见 02 §4.1a）；前端 fetch + ReadableStream，支持中途停止 | 流式期间的结构化卡片渐进升级（当前 done 一次性替换占位卡） |
-| 学习上下文回推（探索档案回传）| `updated_context` 恒为 null | `ChatOut.updated_context` 字段 + 前端 `learn` store 已写好合并逻辑 |
+| 学习上下文回推（探索档案回传）| **已实现**：聊天落库后同步重算 `cognitive_state` 折算进 `ChatOut.updated_context`；另有 `GET /api/student/context`（进主界面拉取 / 练习提交后刷新），前端顶栏进度、侧栏路径与复习到期均已接真实数据 | `cognitive` 块目前只带认知负荷粗估，掌握度数值化（mastery 写入点）、元认知校准仍是空位 |
+| 间隔复习闭环 | **已实现**：`profile_service._schedule_review`（SM-2-lite：首触 2 天、重提间隔翻倍封顶 60 天）→ `review_queue` → `GET /student/context` 的 `review_due` → 侧栏「该回顾了」一键发起回忆式复习会话（种子消息要求 AI 先提问让学生回忆，不打分） | 复习会话本身尚无独立证据标记（与普通对话同链路）；`ease` 因子细化 |
 | RAG 课程知识库 | 无 | `settings.milvus_uri`；错误码 `RAG_ERROR=2001` |
 | 联网搜索 | **已实现**（`app/agent/web_search.py`，Tavily → Bing → ddgs 三级后端，失败结构化降级）| `settings.enable_web_search`（默认关）/ `tavily_api_key` / `web_search_backend` |
 | 代码执行工具 | **已实现**（`app/agent/code_runner.py`，禁网络/禁系统命令/硬超时，`project_guide` 微项目模板可直接跑）| `settings.enable_code_runner`（默认开）/ `code_runner_timeout` |

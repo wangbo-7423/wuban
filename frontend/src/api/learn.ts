@@ -9,6 +9,7 @@ import type {
   PracticeSubmitOut,
   Resp,
 } from './types'
+import type { LearningContext } from '@/types/card'
 
 export interface UploadResult {
   url: string
@@ -174,6 +175,15 @@ export async function submitPractice(
     { timeout: 120000 },
   )
   return res.data as unknown as PracticeSubmitOut
+}
+
+// ── 学习上下文（路径 / 探索深度 / 复习到期）────────────────
+// 与 ChatOut.updated_context 同一份数据形状；进主界面拉一次，
+// 练习提交等不带回推的入口之后也可刷新。
+
+export async function getLearningContext(): Promise<LearningContext> {
+  const res = await http.get<Resp<LearningContext>>('/student/context')
+  return res.data as unknown as LearningContext
 }
 
 // ── 探索档案 ────────────────────────────────────────────────

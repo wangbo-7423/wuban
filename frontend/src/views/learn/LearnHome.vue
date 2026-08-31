@@ -24,7 +24,8 @@ onMounted(() => {
 })
 
 const displayName = computed(() => auth.nickname || auth.role || '同学')
-// updated_context 恒空的遗留字段：只有真有掌握度数据时才展示进度/复习到期
+// 进度/复习到期来自 ChatOut.updated_context 回推与 GET /student/context，
+// mastery 是过程性探索深度估计值，不是考试分数
 const hasProgressData = computed(() => {
   const m = (learn.context?.mastery || {}) as Record<string, number>
   const due = learn.context?.review_due || []
@@ -74,7 +75,12 @@ const dueCount = computed(() => (learn.context?.review_due || []).length)
         }}</span>
         <template v-if="hasProgressData">
           <el-tag size="small" type="success">进度 {{ progress }}%</el-tag>
-          <el-tag size="small" :type="dueCount ? 'warning' : 'info'">
+          <el-tag
+            size="small"
+            :type="dueCount ? 'warning' : 'info'"
+            class="due-tag"
+            @click="dueCount && learn.toggleRight(true)"
+          >
             复习到期 {{ dueCount }}
           </el-tag>
         </template>
@@ -229,6 +235,9 @@ const dueCount = computed(() => (learn.context?.review_due || []).length)
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.due-tag {
+  cursor: pointer;
 }
 .icon-btn {
   width: 34px;

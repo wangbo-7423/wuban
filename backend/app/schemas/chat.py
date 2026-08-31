@@ -56,7 +56,10 @@ class ChatOut(BaseModel):
     tool_calls: list[dict] = Field(default_factory=list)
     conversation_id: str
     title: str | None = None
-    updated_context: dict | None = None  # 抓手：掌握度 / 路径 / 复习到期
+    # 学习上下文回推（GET /student/context 同形状）：course/path/mastery/review_due/cognitive。
+    # mastery 语义是「过程性探索深度估计值」，不是考试分数（docs/00 §6 红线）。
+    # 聊天结束、卡片落库后重算 cognitive_state 折算生成；重算失败时为 null。
+    updated_context: dict | None = None
 
 
 # ────────────────────────────────────────────────────────────

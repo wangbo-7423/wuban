@@ -10,13 +10,27 @@ export type {
   ToolCallRecord,
 } from '@/api/types'
 
-/** 学习上下文面板数据：从后端 agent.updated_context 取，结构由 Agent 决定。 */
+/** 学习上下文：ChatOut.updated_context 回推 / GET /student/context 拉取（后端折算 cognitive_state）。
+ * mastery 字段名是既有契约，语义是「过程性探索深度估计值」，不是考试分数。 */
 export interface LearningContext {
   course: { id?: string; name: string; subject: string; goal: string }
   path: { node: string; status: string; mastery: number; reason?: string }[]
   mastery: Record<string, number>
-  review_due: { kc: string; due: string }[]
-  cognitive: { load_tolerance?: number; metacog_calib?: number; motivation?: string }
+  review_due: {
+    kc: string
+    due: string
+    /** 主题所属课程（发起复习会话时带上） */
+    course?: string
+    reason?: string
+    overdue_days?: number
+  }[]
+  cognitive: {
+    /** 认知负荷粗估（追问密度）：low | medium | high */
+    load?: 'low' | 'medium' | 'high'
+    load_tolerance?: number
+    metacog_calib?: number
+    motivation?: string
+  }
 }
 
 /** 前端持有的会话（含消息列表）。 */

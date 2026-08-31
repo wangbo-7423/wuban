@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import {
   createConversation,
   getConversations,
+  getLearningContext,
   loadMessages,
   streamChat,
   submitPractice,
@@ -86,6 +87,8 @@ export const useLearnStore = defineStore('learn', {
   },
   actions: {
     async init() {
+      // 学习上下文（路径/探索深度/复习到期）静默拉一次：失败不影响会话列表
+      this.refreshContext()
       if (!this.conversations.length) {
         const list = await getConversations()
         this.conversations = list.map(toConv)
@@ -123,6 +126,40 @@ export const useLearnStore = defineStore('learn', {
         this.aborted = true
         this.controller?.abort()
       }
+    },
+
+    /**
+     * 重新拉取学习上下文（GET /student/context）。
+     * 练习提交等不带回推的入口之后调用；失败静默保留旧 context。
+     */
+    async refreshContext() {
+      try {
+        this.context = await getLearningContext()
+      } catch {
+        /* 侧栏/顶栏是辅助信息，拉取失败不影响主对话 */
+      }
+    },
+
+    /**
+     * 发起一次回忆式复习：新建会话并以学生口吻发出种子消息，
+     * 让 AI 先抛引导问题让学生自己回忆（检索练习），而不是直接重讲。
+     */
+    async startReview(topic: string, course: string = 'general') {
+      const t = (topic || '').trim()
+      if (!t || this.busy) return
+      const created = await createConversation({
+        course_id: course || 'general',
+        title: `回顾 · ${t.slice(0, 12)}`,
+      })
+      const mapped = toConv(created)
+      this.conversations.unshift(mapped)
+      this.activeId = mapped.id
+      this.welcoming = false
+      await this.send(
+        `我想回顾一下「${t}」。先别直接给我讲结论——抛几个引导问题让我自己回忆，等我卡住了你再补充和纠正。`,
+        [],
+        course || 'general',
+      )
     },
 
     /**
@@ -234,6 +271,9 @@ export const useLearnStore = defineStore('learn', {
         if (res.title) conv.title = res.title
         if (res.updated_context && typeof res.updated_context === 'object') {
           this.context = res.updated_context as LearningContext
+        } else {
+          // 后端没带回推（如画像重算失败）→ 主动拉一次兜底
+          this.refreshContext()
         }
       } catch (e) {
         dropPlaceholder()
@@ -289,6 +329,8 @@ export const useLearnStore = defineStore('learn', {
         if (idx >= 0) conv.messages[idx] = res.card
         conv.messages.push(res.feedback)
         conv.updated_at = new Date().toISOString()
+        // 作答是过程性证据：画像回推在提交端点里做过，这里刷新上下文展示
+        this.refreshContext()
       } finally {
         this.submitting = false
       }

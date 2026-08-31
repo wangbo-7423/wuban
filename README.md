@@ -65,9 +65,14 @@ cd backend && .venv/Scripts/python.exe -m pytest -q
 - 工具结果压缩（Compress 策略①②）：多轮工具调用时旧轮 Observation 压成一行结论（实测 92% 压缩率），当前轮完整保留、留痕全量不丢；
 - 前缀缓存（Cache 策略）：system 块全静态 + 动态上下文尾部注入，适配智谱隐式前缀缓存（命中半价），生产链路实测二轮命中率 42% 且可观测；
 - 学习画像：与认证解耦的 `learner_profiles.cognitive_state` JSON 字段位、掌握度/认知负荷/复习到位的回推预留位；
+- **学习上下文回推**：每轮聊天落库后同步重算 `cognitive_state`，折算成 `ChatOut.updated_context`
+  （另有 `GET /student/context` 进主界面拉取 / 练习提交后刷新）——顶栏进度、侧栏「我的路径」接真实过程性数据
+  （`mastery` 语义是探索深度估计值，不是考试分数）；
+- **间隔复习闭环**：SM-2-lite 调度（首次接触 2 天后回顾，重新提起间隔翻倍封顶 60 天）→ 到期主题进
+  `review_queue` → 侧栏「该回顾了」一键发起回忆式复习会话（AI 先抛引导问题让学生自己回忆，不打分）；
 - **练习闭环**：`practice`/`choice` 卡作答提交（`/student/practice/submit`）→ `payload.meta.attempts` 留痕
   → LLM 审阅反馈卡（先肯定→指出问题并说明原因→抛引申疑问，不打分）→ `cognitive_state.practice` 过程性证据回推；
-- 质量保障：后端 pytest 单测 81 个（压缩/意图路由/卡片解析/会话记忆/流式编排/选项反馈等纯逻辑），前端 vue-tsc 类型检查。
+- 质量保障：后端 pytest 单测 103 个（压缩/意图路由/卡片解析/会话记忆/流式编排/选项反馈/复习调度/上下文折算等纯逻辑），前端 vue-tsc 类型检查。
 
 完整字段、约束、错误码见 [`docs/02-API接口文档.md`](./docs/02-API接口文档.md)；卡片结构见 [`docs/03-卡片协议.md`](./docs/03-卡片协议.md)。
 

@@ -11,10 +11,16 @@ import { useLearnStore } from '@/stores/learn'
 const learn = useLearnStore()
 
 function tagType(status: string) {
-  return status === 'done' ? 'success' : status === 'active' ? 'primary' : 'info'
+  return status === 'done'
+    ? 'success'
+    : status === 'active'
+      ? 'primary'
+      : status === 'to_review'
+        ? 'warning'
+        : 'info'
 }
 function statusIcon(status: string) {
-  return status === 'done' ? '✓' : status === 'active' ? '●' : '○'
+  return status === 'done' ? '✓' : status === 'active' ? '●' : status === 'to_review' ? '⟳' : '○'
 }
 
 /* ---------- 探索档案（docs/00 §6：不是成绩单，是过程性证据）---------- */
@@ -93,6 +99,21 @@ function shortDate(iso: string | null) {
     return ''
   }
 }
+
+/* ---------- 该回顾了（SM-2-lite 间隔复习：到期主题 → 一键发起回忆式复习）---------- */
+const reviewItems = computed(() => (learn.context?.review_due || []).slice(0, 6))
+const reviewing = ref(false)
+
+async function startReview(kc: string, course?: string) {
+  if (reviewing.value) return
+  reviewing.value = true
+  try {
+    learn.toggleRight(false) // 复习在主聊天区进行，收起侧栏
+    await learn.startReview(kc, course)
+  } finally {
+    reviewing.value = false
+  }
+}
 </script>
 
 <template>
@@ -101,6 +122,33 @@ function shortDate(iso: string | null) {
     <section class="block course">
       <div class="course-name">{{ learn.context?.course?.name || '课程' }}</div>
       <div class="course-goal">{{ learn.context?.course?.goal || '' }}</div>
+    </section>
+
+    <!-- 该回顾了：到期主题，点一下发起回忆式复习（AI 先提问让学生回忆，不判分） -->
+    <section v-if="reviewItems.length" class="block">
+      <h4>
+        该回顾了
+        <span class="mem-stats">间隔复习</span>
+      </h4>
+      <ul class="review-list">
+        <li v-for="r in reviewItems" :key="r.kc">
+          <button
+            class="review-btn"
+            :disabled="reviewing || learn.busy"
+            :title="`回顾「${r.kc}」`"
+            @click="startReview(r.kc, r.course)"
+          >
+            <div class="q-meta">
+              <div class="q-text">{{ r.kc }}</div>
+              <div class="q-time">
+                {{ r.reason || `建议 ${shortDate(r.due)} 前回顾` }}
+              </div>
+            </div>
+            <span class="review-go">{{ reviewing ? '…' : '回顾 →' }}</span>
+          </button>
+        </li>
+      </ul>
+      <p class="hint">先自己回忆、卡住了再让 AI 补——想起来越费劲，下次回顾隔得越近</p>
     </section>
 
     <!-- 我提过的好问题 -->
@@ -133,7 +181,7 @@ function shortDate(iso: string | null) {
           <span class="mastery">{{ Math.round(p.mastery * 100) }}%</span>
         </li>
         <li v-if="!(learn.context?.path || []).length" class="empty">
-          还没有可学习的路径节点
+          聊过的话题会按探索深度出现在这里
         </li>
       </ul>
     </section>
@@ -379,6 +427,42 @@ h4 {
   font-size: 11px;
   color: var(--color-text-2);
   line-height: 1.5;
+}
+/* ---------- 该回顾了（间隔复习）---------- */
+.review-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.review-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #f2e3c4;
+  border-radius: 8px;
+  background: #fffbf2;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s, background 0.15s;
+}
+.review-btn:hover:not(:disabled) {
+  border-color: #e5c98a;
+  background: #fff6e0;
+}
+.review-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+.review-go {
+  flex: none;
+  font-size: 12px;
+  color: #b45309;
+  font-weight: 600;
 }
 /* ---------- 长期记忆图谱 ---------- */
 .mem-stats {
