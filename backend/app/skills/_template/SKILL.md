@@ -46,7 +46,10 @@ when_to_use: |
 ### 新增一个 skill 的完整步骤
 
 1. 复制本目录为 `app/skills/<name>/`；
-2. 写 `solver.py`，导出 `SKILL = SkillSpec(name=..., schema=..., solve=..., module_dir=_MODULE_DIR)`；
+2. 写 `solver.py`，导出 `SKILL = SkillSpec(name=..., schema=..., solve=..., module_dir=_MODULE_DIR,
+   scenes=(...), digest_fields=(...), guide=...)`——三个声明式元数据必须写全：
+   `scenes` 是意图场景归属（如 `("math",)`），`digest_fields` 是压缩摘要的结论字段优先级，
+   `guide` 是场景指南文件名（prompts/ 下，没有就省略）。详见 docs/08-工具层设计.md；
 3. 在 `app/skills/registry.py` 的 `_SKILL_MODULES` 里加上模块名；
 4. 写 `scripts/sanity_check.py` 并跑通验证。
 

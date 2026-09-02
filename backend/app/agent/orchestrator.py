@@ -9,12 +9,13 @@
 
 主循环伪代码：
     init_msg = [*静态system块, *history, 动态上下文(user消息), user]
-    resp = GLM(init_msg + tools)
-    for step in 0..MAX_TOOL_STEPS:
+    for step in 1..MAX_TOOL_STEPS:
+        # 最后一轮不装配 tools，逼模型出正文（否则可能一直调工具、正文为空）
+        resp = GLM(init_msg + tools)   if step < MAX_TOOL_STEPS
+        resp = GLM(init_msg)           if step == MAX_TOOL_STEPS
         if not resp.tool_calls: break
         execute each tool_call; append {role:"tool", content:result}
-        resp = GLM(updated_msg + tools)
-    return final resp.message
+    return final resp.message（正文为空时用思维链草稿兜底）
 """
 from __future__ import annotations
 
@@ -33,7 +34,7 @@ from app.mcp import current_user_id
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_STEPS = 4  # 最多 4 轮工具调用，防止死循环
+MAX_TOOL_STEPS = 4  # 最多 4 次模型调用；到第 4 次强制不给工具，逼模型直接作答
 
 
 @dataclass
@@ -43,6 +44,8 @@ class AgentResult:
     text: str = ""
     thinking: str = ""
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    # 工具循环轮数（Harness 遥测：观察「几轮收敛」+ MAX_TOOL_STEPS 触顶率）
+    tool_steps: int = 0
     raw_message: dict[str, Any] = field(default_factory=dict)
     # Compress 指标：本轮工具循环里压掉的旧轮工具结果总字符数（答辩数据点）
     compressed_chars: int = 0
@@ -70,8 +73,10 @@ class AgentOrchestrator:
         self._temperature = temperature
         # 意图路由（Select 策略）：None=全量装配；列表=只装配名单内的工具/skill
         self._allowed_tools = set(allowed_tools) if allowed_tools is not None else None
-        # memory_search 工具经 ContextVar 取当前用户；流式生成器跨线程迭代，
-        # 端点线程里 set 的上下文传不过去，所以在每个执行段内显式重设
+        # memory_search 等工具经 ContextVar 取当前用户；流式链路下 `_execute_tools`
+        # 是在 tool_events yield 之后被推进来的，anyio.to_thread.run_sync 跨 next()
+        # 时会复制 context，导致 step 顶部 set 的 ContextVar 在工具真正运行时已丢失。
+        # 修复：在 _execute_tools 内每个工具执行前都重 set 一次（self._user_id）。
         self._user_id = user_id
 
     def _bind_user_context(self) -> None:
@@ -112,7 +117,13 @@ class AgentOrchestrator:
         tool_calls: list[Any],
         result: AgentResult,
     ) -> None:
-        """执行一轮 tool_calls 并把结果追加回 messages。"""
+        """执行一轮 tool_calls 并把结果追加回 messages。
+
+        **关键**：在每个工具执行前调用 `_bind_user_context()` 重绑用户上下文。
+        流式链路下 `_execute_tools` 是在 tool_events yield 之后被推进来的，
+        任何 `anyio.to_thread.run_sync` 跨 `next()` 都会复制 context，导致 step
+        顶部设的 ContextVar 在工具真正运行时已丢失。逐工具重绑最稳。
+        """
         # 有 tool_calls：把 assistant 消息 push 回去，执行工具，再让模型继续
         # 注意：assistant 消息里要保留 tool_calls 字段，否则 GLM 会上下文不连续
         messages.append(assistant_msg)
@@ -121,6 +132,7 @@ class AgentOrchestrator:
         # 只改本轮内存 messages；result.tool_calls 的全量留痕不受影响。
         result.compressed_chars += compress_old_tool_results(messages)
         for call in tool_calls:
+            self._bind_user_context()  # 工具执行前再 bind 一次，扛住 yield 跨段
             name, args, call_id = _normalize_tool_call(call)
             _t0 = time.perf_counter()
             exec_result = execute_tool(name, args)
@@ -166,12 +178,16 @@ class AgentOrchestrator:
         while True:
             steps += 1
             if steps > MAX_TOOL_STEPS:
-                logger.warning("Agent 工具调用超过 %d 轮，强制收敛", MAX_TOOL_STEPS)
                 break
+            # 触顶轮不再装配工具：否则模型可能一直调工具、始终不给正文，
+            # 循环结束时 result.text 仍是空串（空答案态，前端只看到工具轨迹）。
+            force_answer = steps >= MAX_TOOL_STEPS
+            if force_answer:
+                logger.warning("Agent 触达 %d 次调用上限，收敛轮不再给工具", MAX_TOOL_STEPS)
 
             self._bind_user_context()
             kwargs: dict[str, Any] = {"messages": messages}
-            if tools:
+            if tools and not force_answer:
                 kwargs["tools"] = tools
                 kwargs["tool_choice"] = "auto"
             if self._temperature is not None:
@@ -196,13 +212,24 @@ class AgentOrchestrator:
                 result.thinking += thinking_piece
 
             tool_calls = msg_dict.get("tool_calls") or []
-            if not tool_calls:
-                # 终止：把最终 assistant 消息写入
+            if not tool_calls or force_answer:
+                # 终止：把最终 assistant 消息写入（收敛轮即使还有 tool_calls 也只取正文）
                 result.text = msg_dict.get("content") or ""
                 result.raw_message = msg_dict
                 break
 
+            result.tool_steps += 1
             self._execute_tools(messages, msg_dict, tool_calls, result)
+
+        if not result.text and result.thinking:
+            # reasoning 吃满 max_tokens 会导致 content 为空（glm-5.3 强制思考，
+            # 思考 token 与正文共用 max_tokens 且优先消耗）。思维链里通常已有
+            # 完整草稿，拿它兜底比直接报错对学生有用得多（同 memory_service._extract）。
+            logger.warning(
+                "Agent 正文为空，用思维链草稿兜底（thinking=%d 字符）",
+                len(result.thinking),
+            )
+            result.text = result.thinking.strip()
 
         if not result.text and not result.tool_calls:
             # 全部陷入工具循环，没拿到文本，降级返回错误
@@ -243,12 +270,15 @@ class AgentOrchestrator:
         while True:
             steps += 1
             if steps > MAX_TOOL_STEPS:
-                logger.warning("Agent 工具调用超过 %d 轮，强制收敛", MAX_TOOL_STEPS)
                 break
+            # 触顶轮不再装配工具（同 run()）：避免出现「只跑工具、没有正文」的空答案
+            force_answer = steps >= MAX_TOOL_STEPS
+            if force_answer:
+                logger.warning("Agent 触达 %d 次调用上限，收敛轮不再给工具", MAX_TOOL_STEPS)
 
             self._bind_user_context()
             kwargs: dict[str, Any] = {"messages": messages, "stream": True}
-            if tools:
+            if tools and not force_answer:
                 kwargs["tools"] = tools
                 kwargs["tool_choice"] = "auto"
             if self._temperature is not None:
@@ -289,7 +319,7 @@ class AgentOrchestrator:
                 msg_dict["tool_calls"] = [tc_acc[i] for i in sorted(tc_acc)]
 
             tool_calls = msg_dict.get("tool_calls") or []
-            if not tool_calls:
+            if not tool_calls or force_answer:
                 result.text = msg_dict["content"]
                 result.raw_message = msg_dict
                 break
@@ -298,7 +328,15 @@ class AgentOrchestrator:
             for call in tool_calls:
                 name, args, _ = _normalize_tool_call(call)
                 yield {"type": "tool", "tool_name": name, "args": args}
+            result.tool_steps += 1
             self._execute_tools(messages, msg_dict, tool_calls, result)
+
+        if not result.text and result.thinking:
+            logger.warning(
+                "Agent 正文为空，用思维链草稿兜底（thinking=%d 字符）",
+                len(result.thinking),
+            )
+            result.text = result.thinking.strip()
 
         if not result.text and not result.tool_calls:
             raise BizError(ErrorCode.COGNITIVE_ENGINE, "AI 没有返回可用内容，请稍后重试")

@@ -482,6 +482,7 @@ def _extract(
                 temperature=0.2,
                 max_tokens=2048,         # 给 reasoning 留足空间，防 content 被吃空
                 enable_thinking=False,   # 不主动开启（实际默认仍开，见上）
+                reasoning_effort="low",  # 结构化抽取，压低思考档位省时省 token
                 response_format={"type": "json_object"},
             )
             msg = resp.choices[0].message

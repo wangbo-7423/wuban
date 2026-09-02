@@ -8,14 +8,27 @@ import { computed, ref } from 'vue'
 import type { ToolCallRecord } from '@/api/types'
 
 const props = withDefaults(
-  defineProps<{ steps: ToolCallRecord[]; defaultOpen?: boolean }>(),
-  { defaultOpen: false },
+  defineProps<{
+    steps: ToolCallRecord[]
+    /** 默认折叠（用户可点开），但流式期间外部传 true 强制展开 */
+    defaultOpen?: boolean
+    /**
+     * 强制展开开关：true 时无视用户点击、always 展开。
+     * 流式期间 ChatPanel 会传 true，让「正在调用工具 / 刚调用完」
+     * 这段过程性轨迹及时浮现，跟思考块节奏一致。
+     */
+    forceOpen?: boolean
+  }>(),
+  { defaultOpen: false, forceOpen: false },
 )
 
-const expanded = ref(props.defaultOpen)
+const userExpanded = ref(props.defaultOpen)
+/** 真实是否对外展开 = 外部强制 OR 用户点击 */
+const expanded = computed(() => props.forceOpen || userExpanded.value)
 const stepOpen = ref<Record<number, boolean>>({})
 
 const totalSteps = computed(() => props.steps.length)
+const hasPending = computed(() => props.steps.some((s) => s.pending))
 const totalMs = computed(() =>
   props.steps.reduce((acc, s) => acc + (s.took_ms || 0), 0),
 )
@@ -28,6 +41,11 @@ function fmtArgs(args: Record<string, unknown> | undefined) {
   }
 }
 
+function toggle() {
+  // 流式期间被外力强制展开时，用户点击仍然能切换意图；
+  // expanded 由 computed 重新计算（forceOpen || userExpanded）。
+  userExpanded.value = !userExpanded.value
+}
 function toggleStep(idx: number) {
   stepOpen.value[idx] = !stepOpen.value[idx]
 }
@@ -49,10 +67,12 @@ function fmt(s?: string) {
 
 <template>
   <div class="tool-trace">
-    <button class="trace-toggle" @click="expanded = !expanded">
+    <button class="trace-toggle" @click="toggle">
       <span class="caret" :class="{ open: expanded }">▸</span>
-      <span class="label">🔧 调用了 {{ totalSteps }} 个工具</span>
-      <span class="meta">耗时 {{ formatMs(totalMs) }}</span>
+      <span class="label">{{
+        hasPending ? '🔧 正在调用工具' : `🔧 调用了 ${totalSteps} 个工具`
+      }}</span>
+      <span v-if="!hasPending" class="meta">耗时 {{ formatMs(totalMs) }}</span>
     </button>
     <transition name="trace">
       <div v-if="expanded" class="trace-list">
@@ -67,9 +87,18 @@ function fmt(s?: string) {
             <span class="step-no">#{{ i + 1 }}</span>
             <el-tag size="small" type="info">工具</el-tag>
             <span class="tool-name">{{ s.tool_name }}</span>
-            <span class="latency">{{ formatMs(s.took_ms || 0) }}</span>
-            <span class="status" :class="{ ok: s.ok !== false, bad: s.ok === false }">
-              {{ s.ok === false ? '失败' : '成功' }}
+            <span class="latency">{{
+              s.pending ? '—' : formatMs(s.took_ms || 0)
+            }}</span>
+            <span
+              class="status"
+              :class="{
+                ok: !s.pending && s.ok !== false,
+                bad: s.ok === false,
+                running: s.pending,
+              }"
+            >
+              {{ s.pending ? '运行中…' : s.ok === false ? '失败' : '成功' }}
             </span>
           </header>
           <transition name="trace">
@@ -188,6 +217,10 @@ function fmt(s?: string) {
 .status.bad {
   background: #fee2e2;
   color: #b91c1c;
+}
+.status.running {
+  background: #dbe6ff;
+  color: #3478f6;
 }
 .trace-body {
   padding: 6px 12px 10px;

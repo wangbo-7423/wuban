@@ -7,7 +7,8 @@
  */
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+// 注意：ElMessage / ElMessageBox 不要手动 import——本项目用 unplugin 按需自动引入，
+// 手动 import 会绕过样式注入，导致 ElMessageBox 确认框无样式、被渲染到视口外（删除流程因此失效）。
 import { useAuthStore } from '@/stores/auth'
 import { useLearnStore } from '@/stores/learn'
 

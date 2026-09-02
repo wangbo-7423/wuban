@@ -240,4 +240,7 @@ SKILL = SkillSpec(
     schema=_schema(),
     solve=solve,
     module_dir=_MODULE_DIR,
+    scenes=("math",),
+    digest_fields=("answer", "final_expr"),
+    guide="guide_math.md",
 )

@@ -28,7 +28,7 @@ const artifacts = computed(() => props.msg.payload?.engineering_artifacts || [])
       <span>审阅反馈</span>
       <span v-if="props.msg.gave_answer === false" class="f-note">指向方向，不替你改</span>
     </div>
-    <div class="body" v-html="html" />
+    <div class="body md-body" v-html="html" />
     <ArtifactGallery v-if="artifacts.length" :artifacts="artifacts" />
     <EvidenceChips v-if="props.msg.evidence?.length" :evidence="props.msg.evidence" />
   </div>

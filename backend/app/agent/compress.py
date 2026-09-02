@@ -15,6 +15,9 @@ LangChain v1 的中间件思想自实现（项目是纯 zai-sdk 自编排，不�
 关键边界：压缩只改 orchestrator 本轮内存里的 messages 列表；
 `AgentResult.tool_calls` 的全量留痕（落库、前端 ToolTrace）不受影响——
 窗口里瘦身，档案里全量。
+
+摘要字段（哪个字段算「结论」）由各工具 / skill 的 spec 用 digest_fields
+就地声明，本模块不做集中维护——见 docs/08-工具层设计.md。
 """
 from __future__ import annotations
 
@@ -24,24 +27,43 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# 摘要字段优先级：不同工具的关键结论字段名不一样，按序取第一个非空的
-# （值为 0/False/空的字段自动跳过——returncode=0、timed_out=False 是「没有新闻」，
-#   异常值如 returncode=1、timed_out=True 才值得占摘要的篇幅）
-_DIGEST_FIELDS = (
-    "answer",        # calculus/ode：最终答案
-    "final_expr",    # ode：末次整理的表达式
-    "value",         # calculator：数值结果
-    "matched",       # kg_lookup：命中的 KG 节点
-    "stdout",        # code_runner：执行输出
-    "entities",      # memory_search：命中的记忆实体
-    "options",       # project_guide：项目选项
-    "timed_out",     # code_runner：执行超时
-    "returncode",    # code_runner：非零退出码
-    "error",         # 失败时的原因（最重要，永远保留）
-)
+# 摘要字段优先级不再集中维护：每个工具 / skill 在自己的 spec 上声明
+# digest_fields（领域知识就地打包，见 docs/08-工具层设计.md），本模块只负责
+# 通用格式化。spec 缺失 / 名字未知的兜底只保留最通用的结论字段。
+_UNKNOWN_FIELDS = ("answer", "value", "stdout")
 _FIELD_CAP = 80  # 摘要里每个字段的字符上限
 
 _DIGEST_MARK = "[已压缩]"  # 让模型知道这是摘要，需要细节可重新调用工具
+
+
+def _tool_name_lookup(messages: list[dict[str, Any]]) -> dict[str, str]:
+    """从 assistant 消息的 tool_calls 里建 tool_call_id → 工具名 映射。
+
+    兼容 OpenAI dict 形态与 zai-sdk 对象形态；查不到名字的工具消息
+    走 _UNKNOWN_FIELDS 兜底，压缩永远不能因为元数据缺失而失败。
+    """
+    lookup: dict[str, str] = {}
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for call in msg.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                call = call.model_dump() if hasattr(call, "model_dump") else dict(call)
+            call_id = call.get("id")
+            name = (call.get("function") or {}).get("name") or call.get("tool_name")
+            if call_id and name:
+                lookup[str(call_id)] = str(name)
+    return lookup
+
+
+def _digest_fields_for(name: str) -> tuple[str, ...]:
+    """按工具名取它 spec 声明的摘要字段；未知工具走通用兜底。"""
+    if name:
+        from app.agent.tools import spec_for
+        spec = spec_for(name)
+        if spec is not None:
+            return tuple(getattr(spec, "digest_fields", ()) or ())
+    return _UNKNOWN_FIELDS
 
 
 def _one_line(s: str) -> str:
@@ -50,8 +72,12 @@ def _one_line(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def digest_tool_content(content: str) -> str:
-    """把序列化的工具结果压成一行结论。解析失败则截断兜底，绝不抛异常。"""
+def digest_tool_content(content: str, digest_fields: tuple[str, ...] = ()) -> str:
+    """把序列化的工具结果压成一行结论。解析失败则截断兜底，绝不抛异常。
+
+    digest_fields：该工具 spec 声明的摘要字段优先级；error 永远保留
+    （失败原因最重要），steps/observations 这类列表只给数量。
+    """
     try:
         data = json.loads(content)
     except (json.JSONDecodeError, TypeError):
@@ -60,7 +86,7 @@ def digest_tool_content(content: str) -> str:
         return f"{_DIGEST_MARK} {str(data)[:100]}"
 
     parts: list[str] = ["ok" if data.get("ok") else "失败"]
-    for field in _DIGEST_FIELDS:
+    for field in (*digest_fields, "error"):
         v = data.get(field)
         if v in (None, "", [], False):
             continue
@@ -83,7 +109,11 @@ def compress_old_tool_results(messages: list[dict[str, Any]]) -> int:
     调用时机由 orchestrator 控制：检测到新一轮 tool_calls、还没有把新结果
     追加进去的时候——此刻列表里的 tool 消息全是旧轮的，模型刚刚消费完
     它们的关键信息；当前轮的完整结果将在追加后原样参加下一次模型调用。
+
+    每条工具消息通过 tool_call_id 反查工具名，按该工具 spec 声明的
+    digest_fields 生成摘要——哪个字段是「结论」只有工具自己知道。
     """
+    name_of = _tool_name_lookup(messages)
     saved = 0
     for msg in messages:
         if msg.get("role") != "tool":
@@ -91,7 +121,8 @@ def compress_old_tool_results(messages: list[dict[str, Any]]) -> int:
         content = msg.get("content") or ""
         if content.startswith(_DIGEST_MARK):
             continue  # 已压过（理论上不会发生，防御重复调用）
-        digest = digest_tool_content(content)
+        fields = _digest_fields_for(name_of.get(str(msg.get("tool_call_id") or ""), ""))
+        digest = digest_tool_content(content, fields)
         if len(digest) < len(content):
             saved += len(content) - len(digest)
             msg["content"] = digest

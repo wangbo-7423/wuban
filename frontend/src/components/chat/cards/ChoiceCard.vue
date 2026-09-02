@@ -29,7 +29,7 @@ function pick(value: string) {
 
 <template>
   <div class="card choice">
-    <p class="body" v-html="renderRich(props.msg.text)" />
+    <p class="body md-body" v-html="renderRich(props.msg.text)" />
     <div class="opts">
       <el-button
         v-for="o in opts"

@@ -27,3 +27,10 @@ Thumbs.db
 .idea/
 .vscode/
 .workbuddy/
+
+# ── 本地参考资料 / 调试产物（不入库）─────────────────────
+Harness/
+ref-project/
+pytest_out.txt
+frontend/tsconfig.tsbuildinfo
+*.tsbuildinfo

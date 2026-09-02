@@ -24,6 +24,7 @@ from typing import Any, Callable
 from app.agent.math_tools import available as sympy_available
 from app.agent.code_runner import run_code, code_runner_schema
 from app.core.config import settings
+from app.skills.base import SkillSpec
 from app.skills.registry import execute_skill, get_skill, skill_schemas
 
 logger = logging.getLogger(__name__)
@@ -183,6 +184,186 @@ def _memory_search_schema() -> dict[str, Any]:
     }
 
 
+# ── 认知状态工具（docs/10-认知状态与工具边界.md）──────────────
+# 分工：scaffold_state = 读档案（按需替代全量注入）；
+#       mastery_evidence = 写证据标签（只记行为时刻，绝不记分数）。
+
+# 受控证据词表：只描述「观察到的行为时刻」，与应试闭环（打分/判对错）划清界限
+_EVIDENCE_TYPES = (
+    "self_explained",      # 学生自己把概念解释通了
+    "deep_question",       # 学生提出了「为什么」层的深层问题
+    "stuck",               # 学生在同一概念上连续卡壳
+    "transferred",         # 学生把概念迁移到了新场景
+    "prediction_checked",  # 学生先预测、再用工具/推导验证了
+)
+
+
+def _normalize_evidence_type(raw: Any) -> str | None:
+    """校验证据类型：受控词表外一律拒绝（防御 GLM 发明新类型）。"""
+    v = str(raw or "").strip().lower()
+    return v if v in _EVIDENCE_TYPES else None
+
+
+def scaffold_state(topic: str = "") -> dict[str, Any]:
+    """查这位学生的认知档案：脚手架级别、认知负荷、已知误区、到期回顾主题。
+
+    数据来自 learner_profiles.cognitive_state（轮后离线聚合的过程性证据），
+    本工具是它的**按需读取口**——模型拿不准引导深浅时查，而不是每轮全量注入。
+    user_id 从请求级 ContextVar 取；无档案时返回 has_state=False 的提示。
+    """
+    from app.mcp import current_user_id
+
+    uid = current_user_id.get()
+    if not uid:
+        return {"ok": False, "error": "当前上下文没有用户身份，无法查认知档案"}
+
+    from app.core.db import SessionLocal
+    from app.models import LearnerProfile
+
+    with SessionLocal() as db:
+        row = (
+            db.query(LearnerProfile).filter(LearnerProfile.user_id == uid).first()
+        )
+    state: dict[str, Any] = (row.cognitive_state or {}) if row else {}
+    if not state:
+        return {
+            "ok": True,
+            "has_state": False,
+            "hint": "该学生还没有认知档案，按初次接触的新学生对待",
+        }
+
+    scaff = state.get("scaffolding") or {}
+    out: dict[str, Any] = {
+        "ok": True,
+        "has_state": True,
+        "cognitive_load": state.get("cognitive_load"),
+        "scaffold_level": scaff.get("recent_scaffold_level"),
+        "gave_answer_ratio": scaff.get("gave_answer_ratio"),
+        "misconceptions": (state.get("misconceptions") or [])[:5],
+        "review_queue": [
+            {
+                "topic": e.get("topic"),
+                "overdue_days": e.get("overdue_days"),
+                "reason": e.get("reason"),
+            }
+            for e in (state.get("review_queue") or [])[:3]
+        ],
+    }
+
+    # 可选聚焦：查当前话题在该学生档案里的状态（探索中/深化中/该回顾）
+    key = (topic or "").strip()
+    if key:
+        out["topic"], out["status"], out["mentions"] = None, None, None
+        for name, t in (state.get("topics") or {}).items():
+            if key in name or name in key:
+                out.update({
+                    "topic": name,
+                    "status": t.get("status"),
+                    "mentions": t.get("mentions"),
+                    "review": t.get("review"),
+                })
+                break
+    return out
+
+
+def _scaffold_state_schema() -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "scaffold_state",
+            "description": (
+                "查询这位学生当前的认知档案：脚手架级别、认知负荷、已知误区、"
+                "到期该回顾的主题。当你不确定该用多深的引导、怀疑学生之前"
+                "学过或卡过当前话题、或想避免重复纠正同一个误区时调用；"
+                "可传 topic 聚焦查看单个概念的状态。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic": {
+                        "type": "string",
+                        "description": (
+                            "可选，当前正在讨论的概念关键词（如 '傅里叶'）；"
+                            "传入时额外返回该话题的历史状态"
+                        ),
+                    }
+                },
+                "required": [],
+            },
+        },
+    }
+
+
+def mastery_evidence(evidence_type: str, topic: str, note: str = "") -> dict[str, Any]:
+    """记录一次过程性证据（受控词表，只记标签不记分数）。
+
+    写入 learning_evidence 表，由 profile_service 轮后聚合进 cognitive_state。
+    校验在连库之前：词表外的类型直接结构化拒绝，防御 GLM 发明新类型。
+    """
+    et = _normalize_evidence_type(evidence_type)
+    if et is None:
+        return {
+            "ok": False,
+            "error": f"evidence_type 必须是 {'/'.join(_EVIDENCE_TYPES)} 之一",
+            "got": str(evidence_type),
+        }
+    topic_clean = (topic or "").strip()[:128]
+    if not topic_clean:
+        return {"ok": False, "error": "topic 不能为空"}
+
+    from app.mcp import current_user_id
+
+    uid = current_user_id.get()
+    if not uid:
+        return {"ok": False, "error": "当前上下文没有用户身份，无法记录证据"}
+
+    from app.core.db import SessionLocal
+    from app.models.evidence import LearningEvidence
+
+    note_clean = (note or "").strip()[:500] or None
+    with SessionLocal() as db:
+        db.add(LearningEvidence(
+            user_id=uid, evidence_type=et, topic=topic_clean, note=note_clean,
+        ))
+        db.commit()
+    return {"ok": True, "evidence_type": et, "topic": topic_clean}
+
+
+def _mastery_evidence_schema() -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "mastery_evidence",
+            "description": (
+                "记录你在对话中观察到的过程性证据标签（注意：是行为记录，不是"
+                "给学生打分）：self_explained=学生自己解释通了；deep_question="
+                "提出了「为什么」层的深层问题；stuck=在同一概念上连续卡壳；"
+                "transferred=把概念迁移到了新场景；prediction_checked=先预测"
+                "再验证。只在明显观察到该时刻时调用一次，不要每轮都调。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "evidence_type": {
+                        "type": "string",
+                        "enum": list(_EVIDENCE_TYPES),
+                        "description": "证据类型（受控词表）",
+                    },
+                    "topic": {
+                        "type": "string",
+                        "description": "证据相关的概念关键词，如 'PID' '卷积'",
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": "可选，一句话现场描述（学生说了什么/做了什么）",
+                    },
+                },
+                "required": ["evidence_type", "topic"],
+            },
+        },
+    }
+
+
 # ── 代码执行（工科微项目线核心）──────────────────────────────
 
 
@@ -216,11 +397,28 @@ def web_search(query: str, top_k: int = 5) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class ToolSpec:
+    """通用工具定义。
+
+    声明式元数据（领域知识就地打包，见 docs/08-工具层设计.md）：
+    - scenes：本工具服务的意图场景；"*" = 所有场景都装配（如 memory_search）。
+      intent.py 据此动态装配工具候选，替代集中式白名单表；
+    - digest_fields：压缩摘要的字段优先级。compress.py 据此把旧轮本工具
+      的完整结果压成一行结论，替代集中式字段表；
+    - guide：渐进式披露的场景指南文件名（prompts/ 目录下）。
+      命中场景时随尾部动态上下文注入，替代 guide_{intent}.md 命名约定。
+
+    新增一个工具 = 在 _build_registry 声明一处 spec（含上述元数据），不改
+    intent.py / compress.py / system.py 任何一行。
+    """
+
     name: str
     description: str
     enabled: bool
     schema: dict[str, Any]
     func: Callable[..., dict[str, Any]]
+    scenes: tuple[str, ...] = ()                # 所属意图场景（"*" = 全场景）
+    digest_fields: tuple[str, ...] = ()         # 压缩摘要字段优先级
+    guide: str | None = None                    # 场景指南文件名（prompts/ 下）
 
 
 def _calculator_schema() -> dict[str, Any]:
@@ -307,6 +505,8 @@ def _build_registry() -> tuple[ToolSpec, ...]:
                 enabled=True,
                 schema=_calculator_schema(),
                 func=calculator,
+                scenes=("math", "engineering"),
+                digest_fields=("value",),
             )
         )
 
@@ -318,6 +518,8 @@ def _build_registry() -> tuple[ToolSpec, ...]:
             enabled=True,
             schema=_kg_lookup_schema(),
             func=kg_lookup,
+            scenes=("math", "engineering", "concept"),
+            digest_fields=("matched",),
         )
     )
 
@@ -332,8 +534,38 @@ def _build_registry() -> tuple[ToolSpec, ...]:
                     enabled=True,
                     schema=_memory_search_schema(),
                     func=memory_search,
+                    scenes=("*",),
+                    digest_fields=("entities",),
                 )
             )
+
+    # 认知状态读工具：按需查档案，替代每轮全量注入（Select 原则）
+    if settings.enable_scaffold_state:
+        specs.append(
+            ToolSpec(
+                name="scaffold_state",
+                description="学生认知档案查询（脚手架级别/负荷/误区/到期回顾）",
+                enabled=True,
+                schema=_scaffold_state_schema(),
+                func=scaffold_state,
+                scenes=("*",),
+                digest_fields=("topic", "status", "cognitive_load"),
+            )
+        )
+
+    # 认知状态写工具：过程性证据标签（只记行为时刻，绝不记分数）
+    if settings.enable_mastery_evidence:
+        specs.append(
+            ToolSpec(
+                name="mastery_evidence",
+                description="记录过程性证据标签（自我解释/深问/卡壳/迁移/预测验证）",
+                enabled=True,
+                schema=_mastery_evidence_schema(),
+                func=mastery_evidence,
+                scenes=("*",),
+                digest_fields=("evidence_type", "topic"),
+            )
+        )
 
     if settings.enable_web_search:
         specs.append(
@@ -343,6 +575,8 @@ def _build_registry() -> tuple[ToolSpec, ...]:
                 enabled=True,
                 schema=_web_search_schema(),
                 func=web_search,
+                scenes=("concept",),
+                digest_fields=("results",),
             )
         )
 
@@ -354,6 +588,8 @@ def _build_registry() -> tuple[ToolSpec, ...]:
                 enabled=True,
                 schema=_code_runner_schema(),
                 func=code_runner,
+                scenes=("engineering",),
+                digest_fields=("stdout", "timed_out", "returncode"),
             )
         )
 
@@ -376,6 +612,18 @@ def get_tool(name: str) -> ToolSpec | None:
         if t.name == name:
             return t
     return None
+
+
+def spec_for(name: str) -> ToolSpec | SkillSpec | None:
+    """按名字取工具或 skill 的 spec（工具优先）。
+
+    压缩 / 路由等通用机制只依赖 spec 上的声明式元数据
+    （scenes / digest_fields / guide），不感知「工具 vs skill」的区别。
+    """
+    tool = get_tool(name)
+    if tool is not None:
+        return tool
+    return get_skill(name)
 
 
 def tool_schemas(allowed: set[str] | None = None) -> list[dict[str, Any]]:

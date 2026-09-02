@@ -37,12 +37,16 @@ export async function sendChat(payload: ChatIn): Promise<ChatOut> {
 
 export interface StreamHandlers {
   onMeta?: (meta: { conversation_id: string; title?: string }) => void
+  /** 阶段提示：preparing = 后端在写库/意图路由（首字节前的空白期） */
+  onStatus?: (ev: { phase: string }) => void
   /** 思考链增量（GLM thinking 模式） */
   onReasoning?: (delta: string) => void
   /** 工具开始执行 */
   onTool?: (ev: { tool_name: string; args: Record<string, unknown> }) => void
   /** 回答正文增量 */
   onDelta?: (text: string) => void
+  /** 正文全文已定（发在切卡前；之后后端还要跑 format_cards 才有 done） */
+  onAnswer?: (ev: { text: string; thinking: string }) => void
 }
 
 export async function streamChat(
@@ -79,6 +83,30 @@ export async function streamChat(
     throw Object.assign(new Error(message), { code: res.status })
   }
 
+  // 后端把业务异常包成 HTTP 200 + JSON 信封（biz 处理器），SSE 端点在开始
+  // 吐流之前失败（鉴权过期/参数校验/模型不可用）时返回的就是它——
+  // content-type 不是 text/event-stream。按信封语义处理，而不是当流读：
+  // 否则 0 帧「正常结束」→ 报「AI 未返回完整回答」，且登录态过期不会跳登录页，
+  // 用户看到的就是「发送后咔嚓一下弹出错误/毫无反应」，完全没有流式过程。
+  const ct = res.headers.get('content-type') || ''
+  if (ct.includes('application/json')) {
+    let body: { code?: number; message?: string } | null = null
+    try {
+      body = await res.json()
+    } catch {
+      /* 非 JSON 体，走通用文案 */
+    }
+    if (body?.code === 401) {
+      localStorage.removeItem('token')
+      if (!window.location.pathname.startsWith('/login')) {
+        window.location.href = '/login'
+      }
+    }
+    throw Object.assign(new Error(body?.message || 'AI 服务暂时不可用'), {
+      code: body?.code ?? res.status,
+    })
+  }
+
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
   let buf = ''
@@ -97,6 +125,9 @@ export async function streamChat(
       case 'meta':
         handlers.onMeta?.(data)
         break
+      case 'status':
+        handlers.onStatus?.(data)
+        break
       case 'reasoning':
         handlers.onReasoning?.(data.delta ?? '')
         break
@@ -105,6 +136,9 @@ export async function streamChat(
         break
       case 'delta':
         handlers.onDelta?.(data.text ?? '')
+        break
+      case 'answer':
+        handlers.onAnswer?.({ text: data.text ?? '', thinking: data.thinking ?? '' })
         break
       case 'done':
         final = data.data as ChatOut

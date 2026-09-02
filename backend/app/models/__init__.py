@@ -5,7 +5,9 @@
 2. 由 `app.core.db.init_db()` 自动 create_all（仅本地）；生产用 Alembic 迁移。
 """
 from .conversation import Conversation, Message
+from .evidence import LearningEvidence
 from .learning import LearnerProfile, LearningDomain, LearningProject
+from .telemetry import AgentTelemetry
 from .user import User
 
 __all__ = [
@@ -15,4 +17,6 @@ __all__ = [
     "LearningProject",
     "Conversation",
     "Message",
+    "AgentTelemetry",
+    "LearningEvidence",
 ]

@@ -57,6 +57,8 @@ export interface ToolCallRecord {
   ok: boolean
   error?: string | null
   took_ms?: number | null
+  /** 流式过程中的占位记录（尚未拿到结果/耗时） */
+  pending?: boolean
 }
 
 export interface ChatOut {

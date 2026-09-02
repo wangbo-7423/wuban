@@ -27,7 +27,16 @@ from typing import Any, Callable
 
 @dataclass(frozen=True)
 class SkillSpec:
-    """一个学科场景的定义。"""
+    """一个学科场景的定义。
+
+    声明式元数据（领域知识就地打包，见 docs/08-工具层设计.md）：
+    - scenes：本 skill 服务的意图场景；"*" = 所有场景都装配。
+      intent.py 据此动态装配工具候选，替代集中式白名单表；
+    - digest_fields：压缩摘要的字段优先级。compress.py 据此把旧轮
+      本 skill 的完整结果压成一行结论，替代集中式字段表；
+    - guide：渐进式披露的场景指南文件名（prompts/ 目录下）。
+      命中场景时随尾部动态上下文注入，替代 guide_{intent}.md 命名约定。
+    """
 
     name: str                                   # 工具名（GLM 调用时用）
     title: str                                  # 中文名（日志 / 调试用）
@@ -36,6 +45,9 @@ class SkillSpec:
     solve: Callable[..., dict[str, Any]]        # 多步求解函数
     prompt_file: str = "SKILL.md"               # 教学提示文件名
     module_dir: Path | None = field(default=None, compare=False)
+    scenes: tuple[str, ...] = ()                # 所属意图场景（"*" = 全场景）
+    digest_fields: tuple[str, ...] = ()         # 压缩摘要字段优先级
+    guide: str | None = None                    # 场景指南文件名（prompts/ 下）
 
     @property
     def prompt_path(self) -> Path | None:

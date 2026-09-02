@@ -17,6 +17,7 @@ import sys
 
 from app.agent.compress import (
     _DIGEST_MARK,
+    _digest_fields_for,
     compress_old_tool_results,
     digest_tool_content,
 )
@@ -44,22 +45,24 @@ _BAD_RESULT = "这不是 JSON{{{"
 _MESSAGES = [
     {"role": "system", "content": "sys"},
     {"role": "user", "content": "算一下"},
-    {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]},
+    {"role": "assistant", "content": "", "tool_calls": [
+        {"id": "c1", "function": {"name": "calculus", "arguments": "{}"}}]},
     {"role": "tool", "tool_call_id": "c1", "content": json.dumps(_CALC_RESULT, ensure_ascii=False)},
-    {"role": "assistant", "content": "答案是 π。接下来我查一下前置。", "tool_calls": [{"id": "c2"}]},
+    {"role": "assistant", "content": "答案是 π。接下来我查一下前置。", "tool_calls": [
+        {"id": "c2", "function": {"name": "kg_lookup", "arguments": "{}"}}]},
     {"role": "tool", "tool_call_id": "c2", "content": json.dumps(_KG_RESULT, ensure_ascii=False)},
 ]
 
 
 def main() -> int:
-    # 1) 各类型摘要的关键字段
-    d1 = digest_tool_content(json.dumps(_CALC_RESULT, ensure_ascii=False))
+    # 1) 各类型摘要的关键字段（字段优先级来自各工具 spec 的 digest_fields 声明）
+    d1 = digest_tool_content(json.dumps(_CALC_RESULT, ensure_ascii=False), _digest_fields_for("calculus"))
     print("[1] calculus 摘要:", d1)
     if "π" not in d1 or "steps×6" not in d1 or not d1.startswith(_DIGEST_MARK):
         print("[FAIL] calculus 摘要丢了答案或步数")
         return 1
 
-    d2 = digest_tool_content(json.dumps(_RUNNER_RESULT, ensure_ascii=False))
+    d2 = digest_tool_content(json.dumps(_RUNNER_RESULT, ensure_ascii=False), _digest_fields_for("code_runner"))
     print("[2] code_runner 摘要:", d2)
     if "a b = 2" not in d2 or "\n" in d2:
         print("[FAIL] code_runner 摘要丢了 stdout 或没压成单行")
@@ -70,7 +73,7 @@ def main() -> int:
         print("[FAIL] 失败结果必须保留 error")
         return 1
 
-    d3 = digest_tool_content(json.dumps(_KG_RESULT, ensure_ascii=False))
+    d3 = digest_tool_content(json.dumps(_KG_RESULT, ensure_ascii=False), _digest_fields_for("kg_lookup"))
     print("[3] kg_lookup 摘要:", d3)
     if "傅里叶变换" not in d3:
         print("[FAIL] kg_lookup 摘要丢了命中节点名")

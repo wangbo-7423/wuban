@@ -308,4 +308,7 @@ SKILL = SkillSpec(
     schema=_schema(),
     solve=solve,
     module_dir=_MODULE_DIR,
+    scenes=("engineering",),
+    digest_fields=("options",),
+    guide="guide_engineering.md",
 )

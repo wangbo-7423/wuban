@@ -34,6 +34,33 @@ const feedback = ref<Record<string, 'like' | 'dislike' | undefined>>({})
 const messages = computed(() => learn.messages)
 const isWelcome = computed(() => learn.isEmpty)
 
+/* ---------- 流式等待计时（让用户知道 AI 在干活，不是卡死） ---------- */
+const now = ref(Date.now())
+let elapsedTimer: number | undefined
+watch(
+  () => learn.busy,
+  (b) => {
+    if (b) {
+      now.value = Date.now()
+      elapsedTimer = window.setInterval(() => (now.value = Date.now()), 1000)
+    } else if (elapsedTimer) {
+      clearInterval(elapsedTimer)
+      elapsedTimer = undefined
+    }
+  },
+)
+/** 该消息是否是当前正在流式生成的占位卡 */
+function isActiveStream(m: CardMessage) {
+  return learn.busy && learn.streamingId === m.id
+}
+const elapsedSec = computed(() => {
+  if (!learn.busy || !learn.streamStartAt) return 0
+  return Math.max(0, Math.floor((now.value - learn.streamStartAt) / 1000))
+})
+function fmtElapsed(s: number) {
+  return s < 60 ? `${s} 秒` : `${Math.floor(s / 60)} 分 ${s % 60} 秒`
+}
+
 /** 用户是否停在消息列表底部附近（上翻阅读时不强制拉底） */
 const isNearBottom = ref(true)
 
@@ -52,6 +79,20 @@ watch(
 )
 watch(
   () => messages.value.length,
+  () => scrollToBottom(),
+)
+// 流式期间：消息条数不变但内容在增长，watch length 感知不到，
+// 这里盯流式占位卡的内容长度，保证长回答时视图持续跟随到底部。
+watch(
+  () => {
+    const m = messages.value.find((x) => x.id === learn.streamingId)
+    if (!m) return 0
+    return (
+      (m.text?.length || 0) +
+      (m.thinking?.length || 0) +
+      (m.tool_calls?.length || 0)
+    )
+  },
   () => scrollToBottom(),
 )
 watch(
@@ -80,7 +121,14 @@ async function send() {
   pendingImages.value = []
   if (textareaEl.value) textareaEl.value.style.height = 'auto'
   isNearBottom.value = true // 用户主动发送时总是滚到底部
-  await learn.send(text, pending, learn.context?.course?.id || 'general')
+  try {
+    await learn.send(text, pending, learn.context?.course?.id || 'general')
+  } catch (e) {
+    // 流式失败时 store 已在会话里落错误卡；会话都没建出来等更早的失败
+    // 只能靠 toast 反馈，否则用户点了发送却毫无反应。
+    const m = (e as { message?: string })?.message
+    if (m) ElMessage.error(m)
+  }
   scrollToBottom(true)
 }
 
@@ -188,6 +236,23 @@ async function share(text: string) {
   }
 }
 
+/* ---------- 悬空提问恢复 ---------- */
+/** 生成中途刷新页面/断连会导致「最后一条是用户消息、没有回复」的悬空状态
+ *  （后端用户消息即时落库，AI 回复要等生成完才落库）。给出提示 + 一键重答。 */
+const danglingQuestion = computed(() => {
+  if (learn.busy || learn.streamingId) return null
+  const msgs = messages.value
+  const last = msgs[msgs.length - 1]
+  if (!last || last.role !== 'user') return null
+  const text = last.text?.trim()
+  return text ? { id: last.id, text } : null
+})
+function retryDangling() {
+  if (!danglingQuestion.value) return
+  input.value = danglingQuestion.value.text
+  send()
+}
+
 /* ---------- 输入区快捷工具 ---------- */
 function insertAtCursor(prefix: string) {
   const el = textareaEl.value
@@ -245,20 +310,44 @@ function insertAtCursor(prefix: string) {
 
               <!-- 消息气泡 -->
               <div class="bubble" :class="m.role">
-                <CardRenderer
-                  :msg="m"
-                  @card-answer="onPracticeSubmit(m, $event)"
-                  @card-pick="onChoicePick(m, $event)"
-                />
-                <!-- 思维链折叠 -->
+                <!-- 流式状态条：置顶显示，用户随时能看到 AI 正在做什么 -->
+                <div v-if="isActiveStream(m)" class="stream-status">
+                  <span class="pulse" aria-hidden="true" />
+                  <span class="status-text">
+                    {{
+                      learn.streamTool
+                        ? `🔧 正在调用 ${learn.streamTool}…`
+                        : learn.streamPhase === 'cards'
+                          ? '🗂 正在整理卡片…'
+                          : learn.streamPhase === 'preparing'
+                            ? '📥 正在理解问题…'
+                            : m.text
+                              ? '✍️ 正在作答…'
+                              : '🧠 正在思考…'
+                    }}
+                  </span>
+                  <span class="elapsed">已等待 {{ fmtElapsed(elapsedSec) }}</span>
+                  <el-button
+                    size="small"
+                    type="danger"
+                    text
+                    class="stop-btn"
+                    @click="stop"
+                  >⏹ 停止</el-button>
+                </div>
+                <!-- 思维链折叠（置于正文上方，流式期间自动展开实时滚动） -->
                 <details
                   v-if="m.role === 'assistant' && m.thinking"
                   class="thinking-block"
+                  :open="isActiveStream(m) ? true : undefined"
                 >
-                  <summary>🧠 思考过程</summary>
+                  <summary>
+                    🧠 思考过程{{ isActiveStream(m) ? '（实时更新中）' : '' }}
+                  </summary>
                   <pre class="thinking-text">{{ m.thinking }}</pre>
                 </details>
-                <!-- 工具调用轨迹（仅助手消息） -->
+                <!-- 工具调用轨迹（仅助手消息，置于正文上方）
+                     流式期间强制展开，让"正在调用 / 刚调用完"的过程及时浮现 -->
                 <ToolTrace
                   v-if="
                     m.role === 'assistant' &&
@@ -266,6 +355,12 @@ function insertAtCursor(prefix: string) {
                     m.tool_calls.length
                   "
                   :steps="m.tool_calls"
+                  :force-open="isActiveStream(m)"
+                />
+                <CardRenderer
+                  :msg="m"
+                  @card-answer="onPracticeSubmit(m, $event)"
+                  @card-pick="onChoicePick(m, $event)"
                 />
               </div>
 
@@ -345,34 +440,24 @@ function insertAtCursor(prefix: string) {
           </div>
         </template>
 
-        <!-- 正在生成：流式占位卡出现后（已在吐字且无工具阶段）就不再显示点点动画 -->
-        <div
-          v-if="learn.busy && (!learn.streaming || learn.streamTool)"
-          class="row assistant"
-        >
+        <!-- 悬空提问：上次生成中途被打断（刷新/断连），提示可重新回答 -->
+        <div v-if="danglingQuestion" class="row assistant">
           <div class="avatar assistant" aria-hidden="true">🤖</div>
           <div class="bubble-wrap">
-            <div class="bubble assistant typing">
-              <span class="dot" />
-              <span class="dot" />
-              <span class="dot" />
-              <span class="typing-text">
-                {{ learn.streamTool ? `🔧 正在调用 ${learn.streamTool}…` : '正在思考…' }}
-              </span>
+            <div class="bubble assistant dangling">
+              <span>⚠️ 上一条提问没有得到回复（可能在生成中途刷新了页面或连接中断）。</span>
               <el-button
                 size="small"
-                type="danger"
+                type="primary"
                 text
-                class="stop-btn"
-                @click="stop"
-              >⏹ 停止</el-button>
+                @click="retryDangling"
+              >↻ 重新回答</el-button>
             </div>
           </div>
         </div>
-        <!-- 输出中但占位卡被翻页等情况的兜底停止按钮 -->
-        <div v-if="learn.busy && learn.streaming && !learn.streamTool" class="streaming-stop-row">
-          <el-button size="small" type="danger" text @click="stop">⏹ 停止生成</el-button>
-        </div>
+
+        <!-- 等待/生成中的状态由流式占位卡内置的状态条承担（占位卡从发送起就在列表里），
+             这里不再渲染独立的 typing 气泡，避免双重指示器。 -->
         </div>
       </div>
     </template>
@@ -574,7 +659,10 @@ function insertAtCursor(prefix: string) {
 .bubble {
   line-height: 1.65;
   word-break: break-word;
-  white-space: pre-wrap;
+  /* 不用 white-space: pre-wrap：气泡内容全是 markdown-it 渲染的 HTML，
+     pre-wrap 会把标签之间的换行符也渲染成可见空行（用户气泡下方大片空白、
+     AI 段落间距翻倍的根因）。需要保留换行的场景（代码块）由 <pre> 自带。 */
+  white-space: normal;
 }
 
 /* ---------- 用户气泡（紧凑、千问风） ---------- */
@@ -676,11 +764,6 @@ function insertAtCursor(prefix: string) {
 }
 .stop-btn {
   margin-left: 8px;
-}
-.streaming-stop-row {
-  display: flex;
-  justify-content: center;
-  margin-top: 4px;
 }
 @keyframes bounce {
   0%, 80%, 100% { transform: translateY(0); opacity: 0.6; }
@@ -885,9 +968,62 @@ function insertAtCursor(prefix: string) {
   background: rgba(15, 23, 42, 0.9);
 }
 
+/* ---------- 悬空提问提示 ---------- */
+.dangling {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px;
+  border: 1px dashed #fbbf24;
+  background: #fffbeb;
+  border-radius: 14px;
+  font-size: 13px;
+  color: #92400e;
+  width: fit-content;
+}
+
+/* ---------- 流式状态条（消息内置顶） ---------- */
+.stream-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  margin: 0 0 10px;
+  background: #f5f8ff;
+  border: 1px solid #dbe6ff;
+  border-radius: 999px;
+  font-size: 12px;
+  color: #4b5563;
+  width: fit-content;
+}
+.stream-status .pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-primary, #3478f6);
+  animation: pulse 1.2s ease-in-out infinite;
+  flex: none;
+}
+.stream-status .status-text {
+  color: var(--color-primary, #3478f6);
+  font-weight: 500;
+}
+.stream-status .elapsed {
+  color: #9ca3af;
+  font-size: 11px;
+}
+.stream-status .stop-btn {
+  margin-left: 2px;
+  padding: 2px 6px;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1.15); }
+}
+
 /* ---------- 思维链折叠 ---------- */
 .thinking-block {
-  margin-top: 10px;
+  margin: 0 0 10px;
   padding: 10px 14px;
   background: #f8fafc;
   border: 1px dashed #cbd5e1;

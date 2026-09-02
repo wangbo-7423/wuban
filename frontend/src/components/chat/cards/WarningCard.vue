@@ -23,7 +23,7 @@ const html = computed(() => renderRich(props.msg.text))
       </svg>
       <span>提醒一下</span>
     </div>
-    <div class="body" v-html="html" />
+    <div class="body md-body" v-html="html" />
   </div>
 </template>
 

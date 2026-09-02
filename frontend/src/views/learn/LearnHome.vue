@@ -18,7 +18,9 @@ const auth = useAuthStore()
 const learn = useLearnStore()
 
 onMounted(() => {
-  learn.init()
+  // init 失败（网络/登录失效）：登录失效由 http 拦截器统一跳登录页，
+  // 其余静默——侧栏与上下文是辅助信息，不阻塞聊天区
+  learn.init().catch(() => {})
   // 启动时同步一次资料：修正 localStorage 里的陈旧昵称，同时校验 token
   auth.refresh().catch(() => {})
 })

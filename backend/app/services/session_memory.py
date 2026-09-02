@@ -214,6 +214,7 @@ def _compress_llm(old_summary: str, transcript: str) -> str | None:
             temperature=0.2,
             max_tokens=800,
             enable_thinking=False,  # 压缩不需要思维链，省时省钱
+            reasoning_effort="low",  # glm-5.3 关不掉思考，用档位压（思考 token 也吃 800 预算）
         )
         text = (resp.choices[0].message.content or "").strip()
         return text or None

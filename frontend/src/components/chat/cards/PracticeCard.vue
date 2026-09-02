@@ -28,8 +28,8 @@ function submit() {
 
 <template>
   <div class="card practice">
-    <p class="body" v-html="renderRich(props.msg.text)" />
-    <div class="stem" v-html="renderRich(props.msg.payload?.stem || '')" />
+    <p class="body md-body" v-html="renderRich(props.msg.text)" />
+    <div class="stem md-body" v-html="renderRich(props.msg.payload?.stem || '')" />
     <div class="hint-row">
       <el-tag v-if="hint > 0" type="warning" size="small">提示 x/{{ maxHints }}</el-tag>
       <el-tag v-if="answered" type="success" size="small">

@@ -28,7 +28,7 @@ function label(name: string | null | undefined, i: number) {
   <div v-if="images.length" class="gallery">
     <div class="g-label">运行结果</div>
     <div class="g-grid">
-      <figure v-for="(a, i) in images" :key="a.url" class="g-item">
+      <figure v-for="(a, i) in images" :key="a.url ?? i" class="g-item">
         <img :src="a.url!" :alt="label(a.name, i)" loading="lazy" @click="open(a.url!)" />
         <figcaption>{{ label(a.name, i) }}</figcaption>
       </figure>

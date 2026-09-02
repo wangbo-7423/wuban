@@ -147,6 +147,9 @@ def format_cards(
             ],
             response_format={"type": "json_object"},
             enable_thinking=False,
+            # 切卡是纯结构化后处理，不需要深度推理；glm-5.3 关不掉思考，
+            # 只能把档位压到 low——这一步跑在 SSE 结束后，慢一秒用户就多等一秒。
+            reasoning_effort="low",
             temperature=0.2,
         )
         content = resp.choices[0].message.content or ""

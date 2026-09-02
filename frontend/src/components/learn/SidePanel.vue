@@ -110,6 +110,10 @@ async function startReview(kc: string, course?: string) {
   try {
     learn.toggleRight(false) // 复习在主聊天区进行，收起侧栏
     await learn.startReview(kc, course)
+  } catch (e) {
+    // 创建会话/流式失败要给用户反馈，否则点击毫无反应
+    const m = (e as { message?: string })?.message
+    if (m) ElMessage.warning(m)
   } finally {
     reviewing.value = false
   }

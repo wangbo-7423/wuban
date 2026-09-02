@@ -11,6 +11,7 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    ArtifactGallery: typeof import('./components/chat/cards/ArtifactGallery.vue')['default']
     CardRenderer: typeof import('./components/chat/CardRenderer.vue')['default']
     ChatPanel: typeof import('./components/chat/ChatPanel.vue')['default']
     ChoiceCard: typeof import('./components/chat/cards/ChoiceCard.vue')['default']

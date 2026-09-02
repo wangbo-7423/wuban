@@ -45,19 +45,22 @@ def load_system_prompt() -> str:
     return _load_md(_REPO_ROOT / "Agent.md", "Agent.md")
 
 
-def load_intent_guide(intent: str) -> str:
-    """渐进式披露：按意图加载场景工具指南；没有对应指南（chat/all）返回空串。
+def load_scene_guide(guide_file: str) -> str:
+    """渐进式披露：加载工具 spec 的 guide 字段声明的场景指南。
 
     指南内容进的是**尾部动态上下文**，不进 system——同一场景内连续轮次
     内容一致，不影响前缀缓存；换了场景指南也换，缓存损失仅限尾部。
+    文件名由各 ToolSpec / SkillSpec 就地声明（取代旧的 guide_{intent}.md
+    命名约定）；声明为空 / 文件不存在返回空串——指南缺失不是配置错误
+    （与主提示词不同：没有指南模型只是少场景提示，不该拦启动）。
     """
-    if not intent or intent in ("chat", "all"):
+    if not guide_file:
         return ""
-    path = _REPO_ROOT / "prompts" / f"guide_{intent}.md"
+    path = _REPO_ROOT / "prompts" / guide_file
     if not path.is_file():
+        logger.warning("场景指南文件不存在（已跳过）: %s", path)
         return ""
-    text = _load_md(path, f"prompts/guide_{intent}.md")
-    return text
+    return _load_md(path, f"prompts/{guide_file}")
 
 
 # 兼容旧导出：只返回静态文本（extra 参数已废弃，见 docstring）

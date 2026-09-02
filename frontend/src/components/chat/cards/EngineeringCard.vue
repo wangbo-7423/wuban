@@ -27,7 +27,7 @@ async function copyCmd(text: string) {
 
 <template>
   <div class="card eng">
-    <p v-if="props.msg.text" class="lead" v-html="renderRich(props.msg.text)" />
+    <p v-if="props.msg.text" class="lead md-body" v-html="renderRich(props.msg.text)" />
 
     <ol v-if="steps.length" class="steps">
       <li v-for="(s, idx) in steps" :key="idx" class="step">

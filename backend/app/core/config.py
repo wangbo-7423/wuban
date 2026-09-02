@@ -55,6 +55,12 @@ class Settings(BaseSettings):
     glm_model: str = "glm-5.3-flash"
     glm_timeout_sec: float = 90.0  # 覆盖 429 排队窗口的 60~90s 等待
     glm_enable_thinking: bool = True
+    # 推理深度档位：low / high / max（GLM-5.2+ 生效，5.3 / 5.3-flash 仅这三档）。
+    # 背景：glm-5.3 系列是「强制思考」模型——thinking 关不掉（传 disabled 会报错），
+    # 且 reasoning 产生的 token 计入 max_tokens、在正文之前被优先消耗。
+    # 不传该参数时平台默认 max（深度推理），是首字延迟和「想得多、输出少」的主因。
+    # 伴学是对话型场景，默认 low；若数学推导质量下滑可改成 high。
+    glm_reasoning_effort: str = "low"
     glm_max_tokens: int = 4096
     glm_temperature: float = 0.7
     # 限流/超时重试：指数退避，仅在可重试错误（429 / 超时）上生效
@@ -101,6 +107,18 @@ class Settings(BaseSettings):
         default_factory=lambda: ["image/png", "image/jpeg", "image/webp"],
         description="图片 MIME 白名单",
     )
+
+    # ── Agent 遥测（Harness 警示二：failure log 当一等公民）──
+    # 每轮 Agent 调用（同步/流式、成功/失败）落一行 agent_telemetry；
+    # 任何异常只打 warning，绝不影响聊天主链路。压测/多租户可关。
+    enable_agent_telemetry: bool = True
+
+    # ── 认知状态工具（docs/10-认知状态与工具边界.md）──────────
+    # scaffold_state（读）：模型按需查学生认知档案，替代全量注入；
+    # mastery_evidence（写）：模型实时记录过程性证据标签（只记标签不记分数）。
+    # 两者都是全场景装配，关掉即从注册表消失，主链路零感知。
+    enable_scaffold_state: bool = True
+    enable_mastery_evidence: bool = True
 
     @field_validator("database_url")
     @classmethod

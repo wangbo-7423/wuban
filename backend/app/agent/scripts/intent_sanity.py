@@ -22,7 +22,7 @@ from app.agent.intent import (  # noqa: E402
     build_tool_context,
     classify_intent,
 )
-from app.agent.system import load_intent_guide, load_system_prompt  # noqa: E402
+from app.agent.system import load_scene_guide, load_system_prompt  # noqa: E402
 from app.agent.tools import tool_schemas  # noqa: E402
 from app.skills.registry import get_skill  # noqa: E402
 
@@ -89,8 +89,8 @@ def main() -> int:
     if len(sys_prompt) < 500 or "AI 理工科伴学" not in sys_prompt:
         print("[FAIL] Agent.md 主提示词加载异常")
         fails += 1
-    if load_intent_guide("chat") != "" or load_intent_guide("all") != "":
-        print("[FAIL] chat/all 不应有场景指南文件")
+    if load_scene_guide("") != "":
+        print("[FAIL] 空 guide 声明应返回空串")
         fails += 1
     print("[5] 提示词真源加载 OK：Agent.md", len(sys_prompt), "字符")
 

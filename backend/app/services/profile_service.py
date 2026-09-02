@@ -107,6 +107,15 @@ def compute_cognitive_state(db: Session, user_id: str) -> dict[str, Any] | None:
                                      "last_seen": None, "_last_dt": None})
         t["mentions"] = max(t["mentions"], info["mentions"])
 
+    # ── 并入 mastery_evidence 工具留痕的过程性证据标签 ──────────
+    # 只做计数合并（evidence: {type: count}），不改判状态/不打分——
+    # 状态仍由 _schedule_review 的时间轴逻辑决定，证据是给人看和给 AI 查的。
+    for etype, etopic, cnt in _evidence_counts(db, user_id):
+        t = topics.setdefault(etopic, {"mentions": 0, "course": "general",
+                                       "last_seen": None, "_last_dt": None})
+        ev = t.setdefault("evidence", {})
+        ev[etype] = ev.get(etype, 0) + cnt
+
     if not topics:
         return None
 
@@ -177,6 +186,31 @@ def compute_cognitive_state(db: Session, user_id: str) -> dict[str, Any] | None:
 
 
 # ── 内部 ─────────────────────────────────────────────────
+
+
+def _evidence_counts(db: Session, user_id: str) -> list[tuple[str, str, int]]:
+    """mastery_evidence 工具留痕的 (evidence_type, topic, count) 聚合。
+
+    独立兜异常：证据表不存在 / 查询失败时返回空，不影响画像主流程。
+    """
+    try:
+        from sqlalchemy import func
+
+        from app.models.evidence import LearningEvidence
+        rows = (
+            db.query(
+                LearningEvidence.evidence_type,
+                LearningEvidence.topic,
+                func.count(LearningEvidence.id),
+            )
+            .filter(LearningEvidence.user_id == user_id)
+            .group_by(LearningEvidence.evidence_type, LearningEvidence.topic)
+            .all()
+        )
+        return [(str(a), str(b), int(c)) for a, b, c in rows]
+    except Exception:  # noqa: BLE001
+        logger.warning("learning_evidence 聚合失败（跳过）", exc_info=True)
+        return []
 
 
 def _schedule_review(

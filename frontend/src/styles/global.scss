@@ -42,3 +42,91 @@ body {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* ---------- AI Markdown 正文排版（.md-body） ----------
+ * 浏览器对 h1-h4 / 松散列表(li>p) / 表格的默认边距很大，
+ * 叠加 GLM 爱输出空行的习惯会放大成巨大间隙，这里统一收紧。 */
+.md-body h1,
+.md-body h2,
+.md-body h3,
+.md-body h4,
+.md-body h5,
+.md-body h6 {
+  margin: 14px 0 6px;
+  line-height: 1.4;
+  font-weight: 600;
+}
+.md-body > :first-child,
+.md-body h1:first-child,
+.md-body h2:first-child,
+.md-body h3:first-child {
+  margin-top: 0;
+}
+.md-body h1 { font-size: 19px; }
+.md-body h2 { font-size: 17px; }
+.md-body h3 { font-size: 16px; }
+/* 松散列表：li 里包的 p 不再产生双倍间距（!important 压过各卡片 scoped 的 p 边距） */
+.md-body li > p {
+  margin: 0 !important;
+}
+.md-body li + li {
+  margin-top: 3px;
+}
+/* 表格：默认无边框太散，给轻量网格 */
+.md-body table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 14px;
+}
+.md-body th,
+.md-body td {
+  border: 1px solid #e5e7eb;
+  padding: 6px 12px;
+  text-align: left;
+}
+.md-body th {
+  background: #f8fafc;
+  font-weight: 600;
+}
+.md-body hr {
+  border: none;
+  border-top: 1px solid #eceff3;
+  margin: 12px 0;
+}
+.md-body blockquote {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 3px solid #dbe6ff;
+  color: var(--color-text-2);
+}
+/* KaTeX 解析失败的公式：等宽原文兜底，不用 KaTeX 的红色报错样式 */
+.math-fallback {
+  font-family: 'Menlo', 'Consolas', monospace;
+  font-size: 0.92em;
+  background: #f6f7fb;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 1px 6px;
+  color: var(--color-text-2);
+  word-break: break-all;
+}
+/* 流式期间的公式占位：轻量等宽 + 呼吸感，流结束后替换为正式 KaTeX 公式 */
+.math-deferred {
+  font-family: 'Menlo', 'Consolas', monospace;
+  font-size: 0.88em;
+  color: var(--color-text-2);
+  background: #f6f7fb;
+  border: 1px dashed #dbe6ff;
+  border-radius: 6px;
+  padding: 1px 6px;
+  word-break: break-all;
+  animation: math-pulse 1.4s ease-in-out infinite;
+}
+div.math-deferred {
+  padding: 8px 12px;
+  margin: 8px 0;
+}
+@keyframes math-pulse {
+  0%, 100% { opacity: 0.65; }
+  50% { opacity: 1; }
+}

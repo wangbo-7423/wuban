@@ -27,15 +27,18 @@ const html = computed(() => renderRich(props.msg.text))
         class="u-scaffold"
       >脚手架·{{ props.msg.scaffold_level }}</span>
     </div>
-    <div class="body" v-html="html" />
+    <div class="body md-body" v-html="html" />
     <EvidenceChips v-if="props.msg.evidence?.length" :evidence="props.msg.evidence" />
   </div>
 </template>
 
 <style scoped>
 .card.understand {
-  border-left: 3px solid #dbe6ff;
-  padding: 2px 0 2px 12px;
+  /* 柔和卡片替代生硬的蓝色左竖条：长内容时竖条会变成一条刺眼的通栏线 */
+  background: #f8faff;
+  border: 1px solid #e8efff;
+  border-radius: 12px;
+  padding: 12px 16px;
 }
 .u-label {
   display: inline-flex;

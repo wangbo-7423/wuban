@@ -94,6 +94,7 @@ def chat(
     stream: bool = False,
     response_format: dict[str, Any] | None = None,
     enable_thinking: bool | None = None,
+    reasoning_effort: str | None = None,
 ) -> Any:
     """单次对话调用。
 
@@ -106,6 +107,9 @@ def chat(
         stream: 是否流式。
         response_format: 结构化输出，如 {"type": "json_object"}。
         enable_thinking: 覆盖 settings 的 thinking 开关（False 时省略 thinking 参数）。
+        reasoning_effort: 推理深度 low/high/max（GLM-5.2+ 生效）。glm-5.3 系列强制思考
+            关不掉，这个档位是唯一能压缩思考量的开关；不传时平台默认 max（深度推理）。
+            传 None 走 settings.glm_reasoning_effort；传 "" 显式不下发（兼容旧模型）。
 
     Returns:
         当 stream=False：原始 ChatCompletion 对象；
@@ -127,6 +131,10 @@ def chat(
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = tool_choice or "auto"
+    if reasoning_effort is None:
+        reasoning_effort = settings.glm_reasoning_effort
+    if reasoning_effort:  # "" 表示显式不下发（模型不支持该参数时用）
+        kwargs["reasoning_effort"] = reasoning_effort
     if temperature is not None:
         kwargs["temperature"] = temperature
     else:

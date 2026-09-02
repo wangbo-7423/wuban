@@ -8,10 +8,13 @@
 | 01 | [系统架构与 Agent 设计](./01-系统架构与Agent设计.md) | 系统分几层、Agent 怎么编排、有哪些工具、知识底座怎么插拔 |
 | 02 | [API 接口文档](./02-API接口文档.md) | **前后端契约**：每个接口的请求/响应字段、类型、约束、示例、错误码 |
 | 03 | [卡片协议](./03-卡片协议.md) | `CardMessage` 全字段定义、16 种卡片类型与 payload 结构、前端渲染规则 |
-| 04 | [数据库设计](./04-数据库设计.md) | 六张表的字段、类型、约束与设计要点 |
+| 04 | [数据库设计](./04-数据库设计.md) | 八张表的字段、类型、约束与设计要点 |
 | 05 | [前端设计与组件规范](./05-前端设计与组件规范.md) | 页面结构、组件分层、状态管理、**每个接口前端发什么字段 / 收到什么字段** |
 | 06 | [开发环境与运行指南](./06-开发环境与运行指南.md) | 后端/前端如何起、联调约定、常见坑、类型契约改动流程 |
 | 07 | [上下文工程设计](./07-上下文工程设计.md) | 上下文窗口分层预算、五策略（Write/Select/Compress/Cache）落地与实验数据、提示词真源（Agent.md） |
+| 08 | [工具层设计](./08-工具层设计.md) | 声明式注册 + 领域知识就地打包：ToolSpec/SkillSpec 元数据、加新工具的步骤、迁移映射与决策记录 |
+| 09 | [Harness 工程设计借鉴](./09-Harness工程设计借鉴.md) | Anthropic 驾驭工程方法论与本项目的对照：八故障覆盖矩阵、教育版概念映射、agent_telemetry 遥测、刻意不采纳清单 |
+| 10 | [认知状态与工具边界](./10-认知状态与工具边界.md) | 认知心理学业务逻辑的三层分工（prompt/DB/Tools）：scaffold_state 读口、mastery_evidence 证据标签写口、分层决策 checklist |
 
 阅读顺序建议：00 → 01 → 07（上下文工程，理解 Agent 行为从哪来）→ 02/03（契约，前后端共同遵守）→ 04/05/06。
 
@@ -20,4 +23,5 @@
 - **接口字段**：`docs/02-API接口文档.md` ↔ `backend/app/schemas/*.py` ↔ `frontend/src/api/types.ts`，三者字段级对齐，改任何一处都要同步其余两处。
 - **卡片协议**：`docs/03-卡片协议.md` ↔ `backend/app/schemas/card.py` ↔ `frontend/src/api/types.ts`（`CardMessage` 部分）↔ `frontend/src/components/chat/CardRenderer.vue`。
 - **Agent 提示词**：`Agent.md`（静态主提示词）+ `prompts/guide_*.md`（场景指南，渐进式披露）↔ `backend/app/agent/system.py`（加载器）。改提示词文件后跑 `cache_sanity` 确认缓存命中。
+- **工具元数据**：工具 → 场景/摘要字段/指南的归属由各 spec 就地声明，见 [08-工具层设计](./08-工具层设计.md)。
 - 历史演进文档见 [_archive](./_archive/README.md)，不再维护。

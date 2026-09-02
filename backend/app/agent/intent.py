@@ -23,17 +23,9 @@ from app.agent import glm_client
 
 logger = logging.getLogger(__name__)
 
-# 意图 → 工具/skill 白名单。memory_search 每轮都给（很小，且回顾记忆对任何场景都有用）；
-# calculator 只在 sympy 不可用时才注册，列在这里无害（过滤时自然跳过未注册的）。
-INTENT_TOOLS: dict[str, list[str] | None] = {
-    "math": ["calculus", "ode", "calculator", "kg_lookup", "memory_search"],
-    "engineering": ["project_guide", "code_runner", "kg_lookup", "calculator", "memory_search"],
-    "concept": ["kg_lookup", "memory_search", "web_search"],
-    "chat": ["memory_search"],
-    # None = 不路由，全量装配（分类失败时的兜底，保持旧行为）
-    "all": None,
-}
-
+# 意图清单与展示名。工具 → 场景的归属不再用集中式白名单表维护，
+# 而是每个 ToolSpec / SkillSpec 用 scenes 字段就地声明（"*" = 全场景），
+# 本模块从注册表动态推导（声明式注册 + 领域知识就地打包，见 docs/08）。
 _INTENT_LABELS = {
     "math": "数学计算/解题",
     "engineering": "工程实操/编程",
@@ -97,22 +89,55 @@ def classify_intent(user_text: str) -> str:
             ],
             temperature=0.1,
             max_tokens=800,
+            reasoning_effort="low",  # 分类任务，别让模型深想（思考 token 也算钱也算时间）
         )
         raw = (resp.choices[0].message.content or "").strip()
         m = re.search(r"\{.*\}", raw, re.S)
         data = json.loads(m.group(0)) if m else {}
         intent = str(data.get("intent") or "").strip()
-        return intent if intent in INTENT_TOOLS else "all"
+        return intent if intent in _INTENT_LABELS else "all"
     except Exception as e:  # noqa: BLE001
         logger.warning("意图分类失败，降级为全量工具: %s", e)
         return "all"
 
 
 def allowed_tool_names(intent: str) -> list[str] | None:
-    """意图 → 本轮应装配的工具名列表；None 表示全量。未知意图也走全量。"""
-    if intent not in INTENT_TOOLS:
+    """意图 → 本轮应装配的工具名列表；None 表示全量。
+
+    从注册表按各 spec 的 scenes 声明动态推导：声明全场景（"*"）或包含
+    本意图的工具/skill 入选。未知意图 / all（分类失败兜底）/ 推导结果
+    为空 → None 全量。
+    """
+    if not intent or intent == "all" or intent not in _INTENT_LABELS:
         return None
-    return INTENT_TOOLS[intent]
+    from app.agent.tools import list_tools
+    from app.skills.registry import list_skills
+
+    names: list[str] = []
+    for spec in (*list_tools(), *list_skills()):
+        scenes = getattr(spec, "scenes", ()) or ()
+        if "*" in scenes or intent in scenes:
+            names.append(spec.name)
+    return names or None
+
+
+def scene_guides(names: list[str]) -> str:
+    """装配名单内工具声明的场景指南（渐进式披露）。
+
+    每个工具用 guide 字段就地声明自己的指南文件（prompts/ 下），
+    去重保序后合并——替代 guide_{intent}.md 的命名约定，新增场景
+    不需要任何文件名约定，spec 指到哪篇就加载哪篇。
+    """
+    from app.agent.system import load_scene_guide
+    from app.agent.tools import spec_for
+
+    seen: list[str] = []
+    for n in names:
+        spec = spec_for(n)
+        guide = getattr(spec, "guide", None) if spec is not None else None
+        if guide and guide not in seen:
+            seen.append(guide)
+    return "\n\n".join(t for t in (load_scene_guide(g) for g in seen) if t)
 
 
 def routing_note(intent: str, available: list[str]) -> str:
@@ -145,26 +170,26 @@ def build_tool_context(user_text: str) -> tuple[str | None, str]:
 def build_scene_context(user_text: str) -> tuple[str | None, str]:
     """/chat 场景装配入口（含渐进式披露）：返回 (allowed_tools, 场景注入文本)。
 
-    注入文本 = 装配说明 + 场景工具指南（prompts/guide_*.md，命中场景才加载；
-    走尾部动态消息，不进 system——同一场景内指南内容不变，不伤前缀缓存）。
+    注入文本 = 装配说明 + 场景工具指南（各工具 spec 的 guide 字段就地声明，
+    命中场景才加载；走尾部动态消息，不进 system——同一场景内指南内容
+    不变，不伤前缀缓存）。
     """
     intent = classify_intent(user_text)
     allowed = allowed_tool_names(intent)
     if allowed is None:
         return None, ""
-    from app.agent.system import load_intent_guide
     from app.agent.tools import list_tools
     from app.skills.registry import get_skill
     registered = {t.name for t in list_tools()}
     available = [n for n in allowed if n in registered or get_skill(n) is not None]
-    parts = [p for p in (routing_note(intent, available), load_intent_guide(intent)) if p]
+    parts = [p for p in (routing_note(intent, available), scene_guides(available)) if p]
     return available, "\n\n".join(parts)
 
 
 __all__ = [
-    "INTENT_TOOLS",
     "classify_intent",
     "allowed_tool_names",
+    "scene_guides",
     "routing_note",
     "build_tool_context",
     "build_scene_context",

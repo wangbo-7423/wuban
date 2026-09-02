@@ -25,15 +25,18 @@ const stem = computed(() => renderRich(props.msg.payload?.stem || ''))
       </svg>
       <span>先弄清楚这一步</span>
     </div>
-    <div v-if="stem" class="q-stem" v-html="stem" />
-    <div v-if="props.msg.text" class="body" v-html="body" />
+    <div v-if="stem" class="q-stem md-body" v-html="stem" />
+    <div v-if="props.msg.text" class="body md-body" v-html="body" />
   </div>
 </template>
 
 <style scoped>
 .card.question {
-  border-left: 3px solid var(--color-primary);
-  padding: 2px 0 2px 12px;
+  /* 柔和卡片替代 3px 主题蓝左竖条，与 UnderstandCard 风格统一 */
+  background: #f6f9ff;
+  border: 1px solid #e3ecff;
+  border-radius: 12px;
+  padding: 12px 16px;
 }
 .q-label {
   display: inline-flex;
