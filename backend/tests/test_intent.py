@@ -19,13 +19,6 @@ from app.agent.intent import (
 )
 
 
-def _fake_llm(content: str):
-    """构造一个 GLM 响应形状的最小替身。"""
-    return SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
-    )
-
-
 def _patch_registry(monkeypatch, tools=(), skills=()):
     """把注册表替身成给定 spec 列表（鸭子类型：只需 name/scenes）。"""
     monkeypatch.setattr("app.agent.tools.list_tools", lambda: tuple(tools))
@@ -105,30 +98,30 @@ class TestClassifyIntent:
         def _boom(*a, **k):
             raise AssertionError("强特征命中时不应再调 LLM")
 
-        monkeypatch.setattr(intent.glm_client, "chat", _boom)
+        monkeypatch.setattr(intent.glm_client, "chat_structured", _boom)
         assert classify_intent("帮我求导数") == "math"
 
     def test_llm_path(self, monkeypatch):
         monkeypatch.setattr(
             intent.glm_client,
-            "chat",
-            lambda *a, **k: _fake_llm('{"intent": "concept"}'),
+            "chat_structured",
+            lambda *a, **k: SimpleNamespace(intent="concept"),
         )
         assert classify_intent("什么是进程") == "concept"
 
     def test_llm_invalid_output_degrades_to_all(self, monkeypatch):
-        monkeypatch.setattr(
-            intent.glm_client,
-            "chat",
-            lambda *a, **k: _fake_llm("我觉得是概念题"),
-        )
+        def _boom(*a, **k):
+            raise ValueError("结构化输出校验失败（重试耗尽）")
+
+        monkeypatch.setattr(intent.glm_client, "chat_structured", _boom)
         assert classify_intent("什么是进程") == "all"
 
     def test_llm_out_of_enum_degrades_to_all(self, monkeypatch):
+        # helper 只锁 JSON 结构；枚举外的值由 classify 的成员检查兜底成 "all"
         monkeypatch.setattr(
             intent.glm_client,
-            "chat",
-            lambda *a, **k: _fake_llm('{"intent": "history"}'),
+            "chat_structured",
+            lambda *a, **k: SimpleNamespace(intent="history"),
         )
         assert classify_intent("什么是进程") == "all"
 
@@ -136,7 +129,7 @@ class TestClassifyIntent:
         def _boom(*a, **k):
             raise RuntimeError("network down")
 
-        monkeypatch.setattr(intent.glm_client, "chat", _boom)
+        monkeypatch.setattr(intent.glm_client, "chat_structured", _boom)
         assert classify_intent("什么是进程") == "all"
 
 

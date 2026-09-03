@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import logging
+from urllib.parse import urlparse
 
 from sqlalchemy.orm import Session
 
@@ -28,6 +29,16 @@ from app.models.telemetry import AgentTelemetry
 logger = logging.getLogger(__name__)
 
 _FAIL_NAMES_CAP = 200  # tool_fail_names 字段的截断长度
+
+# 计算类工具：数学意图轮里，这些一个都没调而答案含数字 → 裸算（bare_numeric）
+_MATH_TOOLS = {"calculator", "calculus", "ode", "code_runner"}
+# 数学场景装配的标志工具（allowed_tools 里出现 → 本轮按数学口径观测）
+_MATH_SCENE_MARKS = {"calculator", "calculus", "ode"}
+# 检索类调用：web_search 工具与 search_verify skill 的结果同形状
+# （results[] 带 url/authority），遥测口径合并统计（docs/11 §6.5）
+_SEARCH_TOOLS = {"web_search", "search_verify"}
+_DOMAIN_CAP = 6  # search_top_domains 最多记录的域个数
+_AUTHORITY_HIGH = 0.85  # 权威结果阈值（官方文档/论文/edu，docs/11 §4）
 
 
 def record_agent_turn(
@@ -88,7 +99,62 @@ def record_agent_turn(
             row.cached_tokens = result.cached_tokens
             row.thinking_chars = len(result.thinking or "")
             row.text_chars = len(result.text or "")
+            _fill_search_and_verify_metrics(row, result, set(allowed_tools or []))
         row.latency_ms = int(latency_ms)
         db.add(row)
     except Exception:  # noqa: BLE001
         logger.warning("agent 遥测记录失败（已忽略，不影响主链路）", exc_info=True)
+
+
+def _fill_search_and_verify_metrics(
+    row: AgentTelemetry, result: AgentResult, allowed: set[str]
+) -> None:
+    """检索与核验指标（docs/11 §4），全部从 AgentResult 确定性推导。
+
+    - search_calls / search_results / search_top_domains：检索类调用
+      （web_search 工具 + search_verify skill，结果同形状）的次数、
+      返回结果总数、命中域（截断存储）——权威域占比、触发率的原料；
+    - bare_numeric：数学口径轮次（装配单里有 calculator/calculus/ode），
+      答案含数字但本轮一个计算工具都没调。启发式是有意的粗口径：
+      「含数字」会把少量不含计算结果的轮也算进来，作为观测指标宁可
+      高估也不漏报——指标只用于对比改动前后趋势，不做个体审判。
+    """
+    search_calls = 0
+    search_results = 0
+    authority_hits = 0
+    domains: list[str] = []
+    used_tools = set()
+    for tc in result.tool_calls:
+        used_tools.add(tc.get("tool_name"))
+        if tc.get("tool_name") not in _SEARCH_TOOLS:
+            continue
+        search_calls += 1
+        r = tc.get("result") or {}
+        rows = r.get("results") or []
+        search_results += len(rows) if isinstance(rows, list) else 0
+        for item in rows if isinstance(rows, list) else []:
+            item = item or {}
+            try:
+                if float(item.get("authority") or 0) >= _AUTHORITY_HIGH:
+                    authority_hits += 1
+            except (TypeError, ValueError):
+                pass
+            url = str(item.get("url") or "")
+            if not url:
+                continue
+            try:
+                domain = (urlparse(url).hostname or "").lower()
+            except ValueError:
+                continue
+            if domain and domain not in domains:
+                domains.append(domain)
+    row.search_calls = search_calls
+    row.search_results = search_results
+    row.search_authority_hits = authority_hits
+    row.search_top_domains = ",".join(domains[:_DOMAIN_CAP]) or None
+
+    math_scene = bool(allowed & _MATH_SCENE_MARKS)
+    has_math_tool = bool(used_tools & _MATH_TOOLS)
+    row.bare_numeric = bool(
+        math_scene and not has_math_tool and any(c.isdigit() for c in result.text)
+    )

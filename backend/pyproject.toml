@@ -13,6 +13,7 @@ dependencies = [
     # 数据
     "sqlalchemy>=2.0.52",
     "psycopg2-binary>=2.9.12",
+    "alembic>=1.16.0",                 # 数据库迁移（启动时 upgrade head，唯一 schema 演进路径）
     # 配置
     "pydantic>=2.13.4",
     "pydantic-settings>=2.15.0",
@@ -22,6 +23,8 @@ dependencies = [
     "bcrypt>=5.0.0",
     # 符号计算（sympy_calc 工具：积分/求导/极限/解方程/线代）
     "sympy>=1.13.0",
+    # code_runner 画图（工科微项目线价值主张：学生贴仿真脚本，AI 跑出图给审阅反馈）
+    "matplotlib>=3.9",
     # 大模型（智谱 AI GLM 5.3 Flash）
     "zai-sdk>=0.2.3",
     "mcp>=2.1.1",

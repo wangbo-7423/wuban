@@ -1,10 +1,10 @@
 """《操作系统》知识图谱（原型课程）。"""
 from __future__ import annotations
 
-from .base import KGNode
+from .base import KGNode, KeywordMatchMixin
 
 
-class OSGraph:
+class OSGraph(KeywordMatchMixin):
     course_id = "os"
     course_name = "操作系统"
     subject = "计算机"
@@ -32,9 +32,3 @@ class OSGraph:
     def strategy_weights(self) -> dict[str, float]:
         # 抽象概念多 → 类比/可视化 权重最高
         return {"类比": 1.0, "可视化": 1.0, "分解": 0.8, "反例": 0.6}
-
-    def match_node(self, text: str) -> str | None:
-        for node_id, kws in self._keywords.items():
-            if any(k in text for k in kws):
-                return node_id
-        return None

@@ -3,10 +3,13 @@
  * 数学计算卡片
  *  - `payload.math` 含 problem / steps / answer / unit
  *  - step 的 expr 用 KaTeX 渲染（renderKatex）
+ *  - step 的 note 是说明文字，走 renderRich：模型偶尔在 note 里
+ *    写了 $...$ 公式（如「用幂函数积分公式 $\int u^n du$」），
+ *    纯文本插值会把 LaTeX 原样漏出来
  */
 import { computed } from 'vue'
 import type { CardMessage } from '@/api/types'
-import { renderKatex } from '@/utils/render'
+import { renderKatex, renderInline } from '@/utils/render'
 import EvidenceChips from '@/components/learn/EvidenceChips.vue'
 
 const props = defineProps<{ msg: CardMessage }>()
@@ -20,7 +23,7 @@ const math = computed(() => props.msg.payload?.math)
     <ol v-if="math?.steps?.length" class="steps">
       <li v-for="(s, idx) in math.steps" :key="idx">
         <span class="expr" v-html="renderKatex(s.expr)" />
-        <span v-if="s.note" class="note">{{ s.note }}</span>
+        <span v-if="s.note" class="note" v-html="renderInline(s.note)" />
       </li>
     </ol>
 

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /**
- * 学习状态抽屉主体：把原 SidePanel + MasteryRadar 合在一起
- * - 课程信息 / 知识图谱路径 / 掌握度进度 / 雷达图 / 认知状态
+ * 学习状态抽屉主体：探索过程的档案视图（docs/00 §6：过程性证据，不打分）
+ * - 课程信息 / 该回顾了 / 好问题 / 知识图谱路径 / 探索过的主题 / 记忆图谱
+ * - 刻意只展示状态与诚实计数（聊过 N 次），不展示「掌握度/进度」类百分数
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { getExploration, getMemoryGraph } from '@/api/learn'
@@ -9,6 +10,14 @@ import type { ExplorationOut, MemoryGraphOut } from '@/api/learn'
 import { useLearnStore } from '@/stores/learn'
 
 const learn = useLearnStore()
+
+const courseName = computed(() => learn.context?.course?.name || '')
+const courseGoal = computed(() => learn.context?.course?.goal || '')
+// "general"/缺失 = 未绑定具体课程的综合模式，不是课程名
+const hasCourse = computed(() => {
+  const id = learn.context?.course?.id || ''
+  return !!courseName.value && id !== '' && id !== 'general'
+})
 
 function tagType(status: string) {
   return status === 'done'
@@ -122,10 +131,10 @@ async function startReview(kc: string, course?: string) {
 
 <template>
   <div class="side-pane">
-    <!-- 课程信息 -->
-    <section class="block course">
-      <div class="course-name">{{ learn.context?.course?.name || '课程' }}</div>
-      <div class="course-goal">{{ learn.context?.course?.goal || '' }}</div>
+    <!-- 课程信息（general/缺失 = 综合模式，不是课程，不展示占位名） -->
+    <section v-if="hasCourse || courseGoal" class="block course">
+      <div v-if="hasCourse" class="course-name">{{ courseName }}</div>
+      <div v-if="courseGoal" class="course-goal">{{ courseGoal }}</div>
     </section>
 
     <!-- 该回顾了：到期主题，点一下发起回忆式复习（AI 先提问让学生回忆，不判分） -->
@@ -182,7 +191,6 @@ async function startReview(kc: string, course?: string) {
             <div class="name">{{ p.node }}</div>
             <div class="reason">{{ p.reason }}</div>
           </div>
-          <span class="mastery">{{ Math.round(p.mastery * 100) }}%</span>
         </li>
         <li v-if="!(learn.context?.path || []).length" class="empty">
           聊过的话题会按探索深度出现在这里
@@ -190,23 +198,23 @@ async function startReview(kc: string, course?: string) {
       </ul>
     </section>
 
-    <!-- 探索过的主题 -->
+    <!-- 探索过的主题：kg_lookup 真实命中的话题。只展示主题与聊过次数，
+         不做「深度百分比」——估计值以百分数呈现会被读成分数（docs/00 §6） -->
     <section class="block">
       <h4>探索过的主题</h4>
-      <div v-if="exploration?.topics.length" class="radar">
-        <span v-for="t in exploration.topics" :key="t.topic" class="bar">
-          <span class="bar-label">{{ t.topic }}</span>
-          <span class="bar-track">
-            <span
-              class="bar-fill"
-              :style="{ width: Math.round(t.depth * 100) + '%' }"
-            />
-          </span>
-          <span class="bar-val">{{ Math.round(t.depth * 100) }}%</span>
-        </span>
+      <div v-if="exploration?.topics.length" class="mem-tags">
+        <el-tag
+          v-for="t in exploration.topics"
+          :key="t.topic"
+          size="small"
+          effect="plain"
+          :title="`聊过 ${t.mentions} 次`"
+        >
+          {{ t.topic }}
+        </el-tag>
       </div>
       <p v-else class="empty">还没有探索记录</p>
-      <p class="hint">深度是过程性证据的估计值，不是测验分数</p>
+      <p class="hint">主题与次数都来自真实对话留痕，越聊越多</p>
     </section>
 
     <!-- 还想深入的线索 -->
@@ -332,46 +340,6 @@ h4 {
 }
 .path .reason {
   font-size: 11px;
-  color: var(--color-text-2);
-}
-.path .mastery {
-  color: var(--color-text-2);
-  font-size: 12px;
-}
-.radar {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-}
-.bar-label {
-  width: 80px;
-  color: var(--color-text-2);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.bar-track {
-  flex: 1;
-  height: 6px;
-  background: var(--color-bg);
-  border-radius: 999px;
-  overflow: hidden;
-}
-.bar-fill {
-  display: block;
-  height: 100%;
-  background: linear-gradient(90deg, #3478f6 0%, #5e8bff 100%);
-  border-radius: 999px;
-}
-.bar-val {
-  width: 36px;
-  text-align: right;
   color: var(--color-text-2);
 }
 .empty {

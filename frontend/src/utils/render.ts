@@ -94,6 +94,19 @@ export function renderRich(text: string, deferMath = false): string {
   return html
 }
 
+/** 行内富文本渲染：Markdown 行内元素 + $...$ 公式，不包 <p>。
+ *  用于嵌入行内结构的短语级文本（如 math 卡步骤的 note）——
+ *  renderRich 走 md.render 会包 <p>，放进 <span> 是非法嵌套，浏览器会把 <p> 挤出容器。 */
+export function renderInline(text: string): string {
+  if (!text) return ''
+  const { text: mdText, slots } = extractMath(text)
+  let html = md.renderInline(mdText)
+  slots.forEach((slot, i) => {
+    html = html.split(`@@MATH${i}@@`).join(renderSlot(slot))
+  })
+  return html
+}
+
 /** 流式期间的公式占位：等宽原文 + 呼吸动画，提示"公式稍后成形"。 */
 function renderSlotDeferred({ expr, display }: MathSlot): string {
   const esc = expr

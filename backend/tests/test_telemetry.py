@@ -96,3 +96,106 @@ class TestRecordAgentTurn:
             success=True,
         )
         assert len(db.rows[0].allowed_tools) <= 255
+
+
+class TestSearchAndVerifyMetrics:
+    """检索与核验指标（docs/11 §4）：搜索留痕 + 裸算率口径。"""
+
+    @staticmethod
+    def _search_result() -> AgentResult:
+        r = AgentResult()
+        r.text = "官方文档确认该 API 已移除"
+        r.tool_calls = [
+            {
+                "tool_name": "web_search", "args": {}, "ok": True, "took_ms": 800,
+                "result": {"ok": True, "results": [
+                    {"title": "a", "url": "https://docs.python.org/3/", "authority": 1.0},
+                    {"title": "b", "url": "https://numpy.org/doc/", "authority": 1.0},
+                ]},
+            },
+            {
+                "tool_name": "web_search", "args": {}, "ok": True, "took_ms": 600,
+                "result": {"ok": True, "results": [
+                    {"title": "c", "url": "https://docs.python.org/3/library/io", "authority": 1.0},
+                    {"title": "bad", "url": "::::", "authority": 0},
+                ]},
+            },
+        ]
+        return r
+
+    def test_search_metrics_filled(self, _telemetry_on):
+        db = _FakeDB()
+        record_agent_turn(
+            db, user_id="u1", allowed_tools=["web_search"],
+            result=self._search_result(), success=True,
+        )
+        row = db.rows[0]
+        assert row.search_calls == 2
+        assert row.search_results == 4
+        # 域去重且解析失败的 url 不计入
+        assert row.search_top_domains == "docs.python.org,numpy.org"
+
+    def test_bare_numeric_true_when_math_scene_no_tool(self, _telemetry_on):
+        db = _FakeDB()
+        r = AgentResult()
+        r.text = "结果约为 0.707，积分收敛"
+        r.tool_calls = [{"tool_name": "kg_lookup", "args": {}, "result": {}, "ok": True}]
+        record_agent_turn(
+            db, user_id="u1", allowed_tools=["calculus", "ode", "kg_lookup"],
+            result=r, success=True,
+        )
+        assert db.rows[0].bare_numeric is True
+
+    def test_bare_numeric_false_with_calc_tool(self, _telemetry_on):
+        db = _FakeDB()
+        r = AgentResult()
+        r.text = "结果为 42"
+        r.tool_calls = [{"tool_name": "calculus", "args": {}, "result": {}, "ok": True}]
+        record_agent_turn(
+            db, user_id="u1", allowed_tools=["calculus"], result=r, success=True,
+        )
+        assert db.rows[0].bare_numeric is False
+
+    def test_bare_numeric_false_outside_math_scene(self, _telemetry_on):
+        db = _FakeDB()
+        r = AgentResult()
+        r.text = "有 3 个步骤"
+        r.tool_calls = []
+        record_agent_turn(
+            db, user_id="u1", allowed_tools=["kg_lookup", "memory_search"],
+            result=r, success=True,
+        )
+        assert db.rows[0].bare_numeric is False
+
+    def test_authority_hits_counted(self, _telemetry_on):
+        """权威域占比的分子：authority ≥ 0.85 的结果条数。"""
+        db = _FakeDB()
+        r = self._search_result()  # 4 条结果：1.0 / 1.0 / 1.0 / 0（bad url 无 authority）
+        record_agent_turn(
+            db, user_id="u1", allowed_tools=["web_search"], result=r, success=True,
+        )
+        row = db.rows[0]
+        assert row.search_results == 4
+        assert row.search_authority_hits == 3
+
+    def test_search_verify_skill_counted(self, _telemetry_on):
+        """search_verify skill 与 web_search 同口径并入检索指标（docs/11 §6.5）。"""
+        db = _FakeDB()
+        r = AgentResult()
+        r.text = "官方迁移指南确认该断言"
+        r.tool_calls = [
+            {
+                "tool_name": "search_verify", "args": {}, "ok": True, "took_ms": 3000,
+                "result": {"ok": True, "verdict_hint": "extracts_available", "results": [
+                    {"title": "a", "url": "https://numpy.org/release", "authority": 1.0},
+                ]},
+            },
+        ]
+        record_agent_turn(
+            db, user_id="u1", allowed_tools=["search_verify"], result=r, success=True,
+        )
+        row = db.rows[0]
+        assert row.search_calls == 1
+        assert row.search_results == 1
+        assert row.search_authority_hits == 1
+        assert row.search_top_domains == "numpy.org"

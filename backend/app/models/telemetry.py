@@ -51,6 +51,15 @@ class AgentTelemetry(Base):
     thinking_chars: Mapped[int] = mapped_column(Integer, default=0)    # 思维链字符
     text_chars: Mapped[int] = mapped_column(Integer, default=0)        # 最终回答字符
 
+    # ── 检索与核验指标（docs/11 §4：搜索质量与裸算率观测）──
+    search_calls: Mapped[int] = mapped_column(Integer, default=0)      # web_search 次数
+    search_results: Mapped[int] = mapped_column(Integer, default=0)    # 返回结果总数
+    # authority ≥ 0.85（官方文档/论文/edu）的结果条数 → 权威域占比的分子
+    search_authority_hits: Mapped[int] = mapped_column(Integer, default=0)
+    search_top_domains: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # 数学意图轮答案含数值却没调任何计算工具（裸算率分子；启发式口径见 service）
+    bare_numeric: Mapped[bool] = mapped_column(Boolean, default=False)
+
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)        # 端到端耗时
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True

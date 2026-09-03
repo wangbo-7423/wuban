@@ -137,8 +137,6 @@ async function confirmDelete(id: string) {
       </li>
     </ul>
 
-    <div class="footer-spacer" />
-
     <div class="user-card">
       <div class="user-info" @click="openSettings">
         <span class="avatar">{{ initial }}</span>
@@ -217,10 +215,15 @@ async function confirmDelete(id: string) {
 .items {
   list-style: none;
   margin: 0;
-  padding: 0;
+  padding: 2px 2px 6px 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* 列表自身滚动：头部「新建对话」按钮与底部用户信息卡保持固定 */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .item {
   display: flex;
@@ -298,9 +301,6 @@ async function confirmDelete(id: string) {
   background: #f6f7fb;
   border-radius: 8px;
 }
-.footer-spacer {
-  flex: 1;
-}
 .user-card {
   display: flex;
   align-items: center;
@@ -310,6 +310,7 @@ async function confirmDelete(id: string) {
   border-top: 1px solid #eceff3;
   background: #fff;
   border-radius: 10px;
+  flex: none;
 }
 .user-info {
   display: flex;

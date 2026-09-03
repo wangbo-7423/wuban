@@ -220,10 +220,35 @@ function like(id: string) {
 function dislike(id: string) {
   feedback.value[id] = feedback.value[id] === 'dislike' ? undefined : 'dislike'
 }
-function regen(text: string) {
-  // 找到上一条用户消息，重新发送
-  input.value = text
-  send()
+/** 重新生成：重发这条回复对应的「上一条用户提问」（含附图），让 AI 再答一次。
+ *  会话是追加式的，不删旧回复——等价于把当时的问题在末尾再问一遍。 */
+function regen(m: CardMessage) {
+  if (learn.busy) return
+  const msgs = messages.value
+  const idx = msgs.findIndex((x) => x.id === m.id)
+  if (idx < 0) return
+  let prev: CardMessage | undefined
+  for (let i = idx - 1; i >= 0; i--) {
+    if (msgs[i].role === 'user') {
+      prev = msgs[i]
+      break
+    }
+  }
+  const text = prev?.text?.trim()
+  if (!prev || !text) return
+  // 当时的附图存在 payload.meta.images（后端回放的消息同形状），一并带上
+  const meta = prev.payload?.meta as
+    | { images?: { url: string; detail?: 'auto' | 'low' | 'high' }[] }
+    | undefined
+  const images = (meta?.images || []).slice()
+  isNearBottom.value = true
+  learn
+    .send(text, images, learn.context?.course?.id || 'general')
+    .catch((e) => {
+      const msg = (e as { message?: string })?.message
+      if (msg) ElMessage.error(msg)
+    })
+  scrollToBottom(true)
 }
 
 /** 分享：把该条回复复制到剪贴板 */
@@ -412,7 +437,7 @@ function insertAtCursor(prefix: string) {
                     />
                   </svg>
                 </button>
-                <button class="action" title="重新生成" @click="regen(m.text)">
+                <button class="action" title="重新生成" @click="regen(m)">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
                     <path
                       d="M3 12a9 9 0 0115-6.7L21 8M3 12l3 3.7L9 18M21 12a9 9 0 01-15 6.7L3 16"

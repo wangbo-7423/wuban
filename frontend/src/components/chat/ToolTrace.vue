@@ -50,6 +50,8 @@ function toggleStep(idx: number) {
   stepOpen.value[idx] = !stepOpen.value[idx]
 }
 function formatMs(ms: number) {
+  // 进程内工具（如 kg_lookup 关键词匹配）常快于 1ms，int 截断后为 0——显示 <1 ms 比 0 ms 诚实
+  if (ms <= 0) return '<1 ms'
   if (ms < 1000) return `${ms} ms`
   return `${(ms / 1000).toFixed(2)} s`
 }

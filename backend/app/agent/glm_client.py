@@ -11,11 +11,14 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import random
+import re
 import time
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable, Iterator, TypeVar
 
+from pydantic import BaseModel, ValidationError
 from zai import ZhipuAiClient
 
 from app.core.config import settings
@@ -233,3 +236,68 @@ def iter_stream_chunks(stream: Iterable[Any]) -> Iterator[tuple[str, str]]:
         if tool_calls_piece:
             yield "tool_calls", tool_calls_piece
     yield "done", ""
+
+
+# ────────────────────────────────────────────────────────────
+# 5. 结构化输出：「提示词|模型|输出解析器」模式的原生实现
+#    （LangChain OutputFixingParser 的最小自产集，不引框架）
+# ────────────────────────────────────────────────────────────
+
+_TModel = TypeVar("_TModel", bound=BaseModel)
+
+
+def extract_json_object(text: str) -> Any:
+    """从模型输出里抽出 JSON 对象：兼容 ```json 围栏与裸 JSON。解析失败抛 JSONDecodeError。"""
+    t = (text or "").strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```[a-zA-Z]*\n?", "", t)
+        t = re.sub(r"\n?```$", "", t).strip()
+    return json.loads(t)
+
+
+def chat_structured(
+    messages: list[dict[str, Any]],
+    schema: type[_TModel],
+    *,
+    fix_attempts: int = 1,
+    **chat_kwargs: Any,
+) -> _TModel:
+    """JSON mode 调用 + pydantic 校验，失败带错误反馈重试。
+
+    调用方只写「提示词 + schema」，拿到的是校验过的模型实例——
+    解析/校验失败时把失败原因追加为一条 user 消息再试 `fix_attempts`
+    轮（模型最擅长修自己格式上的小错：漏字段、多围栏、枚举拼错）。
+
+    约束：
+    - messages 的 system 块必须保持静态（智谱前缀缓存按前缀命中），
+      重试只追加在尾部，不动 system——与 orchestrator 的缓存策略一致；
+    - API 层失败（429/超时/鉴权）不进 fix 循环，chat() 自己的重试与
+      GLMUnavailable 异常语义原样向上抛；
+    - helper 不替业务决定降级：fix 耗尽后抛最后一个校验异常，由调用方
+      兜底（意图分类 → "all"，切卡 → 兜底单卡）。
+    """
+    msgs = list(messages)
+    last_exc: Exception | None = None
+    for attempt in range(max(0, fix_attempts) + 1):
+        resp = chat(messages=msgs, response_format={"type": "json_object"}, **chat_kwargs)
+        content = (getattr(resp.choices[0].message, "content", None) or "")
+        try:
+            return schema.model_validate(extract_json_object(content))
+        except (json.JSONDecodeError, ValidationError) as e:
+            last_exc = e
+            logger.warning(
+                "结构化输出校验失败（第 %d/%d 次，%s）: %s",
+                attempt + 1, max(0, fix_attempts) + 1, type(e).__name__, str(e)[:300],
+            )
+            msgs = msgs + [
+                {"role": "assistant", "content": content},
+                {
+                    "role": "user",
+                    "content": (
+                        f"上面的输出不符合要求的 JSON 结构（{type(e).__name__}: {str(e)[:400]}）。"
+                        "请重新输出：只给一个符合要求的 JSON 对象，不要解释、不要 markdown 围栏。"
+                    ),
+                },
+            ]
+    assert last_exc is not None
+    raise last_exc

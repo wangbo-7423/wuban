@@ -14,10 +14,10 @@ LLM 在 8 个候选里挑对工具，远不如在 3 个候选里挑对。
 """
 from __future__ import annotations
 
-import json
 import logging
-import re
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel
 
 from app.agent import glm_client
 
@@ -68,6 +68,12 @@ def _heuristic_intent(text: str) -> str | None:
     return None
 
 
+class _IntentOut(BaseModel):
+    """分类结果的 schema：枚举拼错/结构散架会在 helper 内触发带错误反馈的重试。"""
+
+    intent: Literal["math", "engineering", "concept", "chat"]
+
+
 def classify_intent(user_text: str) -> str:
     """意图分类：启发式强特征优先（零成本），否则极小 GLM 调用。
 
@@ -82,19 +88,18 @@ def classify_intent(user_text: str) -> str:
     if heuristic:
         return heuristic
     try:
-        resp = glm_client.chat(
+        out = glm_client.chat_structured(
             messages=[
                 {"role": "system", "content": _CLASSIFY_SYSTEM},
                 {"role": "user", "content": _CLASSIFY_USER_TMPL.format(text=text[:500])},
             ],
+            schema=_IntentOut,
+            fix_attempts=1,  # 枚举拼错给一次自纠机会；再多就拖路由时延了
             temperature=0.1,
             max_tokens=800,
             reasoning_effort="low",  # 分类任务，别让模型深想（思考 token 也算钱也算时间）
         )
-        raw = (resp.choices[0].message.content or "").strip()
-        m = re.search(r"\{.*\}", raw, re.S)
-        data = json.loads(m.group(0)) if m else {}
-        intent = str(data.get("intent") or "").strip()
+        intent = str(out.intent or "").strip()
         return intent if intent in _INTENT_LABELS else "all"
     except Exception as e:  # noqa: BLE001
         logger.warning("意图分类失败，降级为全量工具: %s", e)

@@ -34,3 +34,7 @@ ref-project/
 pytest_out.txt
 frontend/tsconfig.tsbuildinfo
 *.tsbuildinfo
+
+# ── 演示文稿及其资源（不入库）───────────────────────────
+*.pptx
+.ppt_assets/

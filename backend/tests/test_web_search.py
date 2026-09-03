@@ -162,3 +162,44 @@ class TestToolsWiring:
         fn = _web_search_schema()["function"]
         assert fn["name"] == "web_search"
         assert set(fn["parameters"]["required"]) == {"query"}
+
+
+class TestDomainPolicy:
+    """检索 curation：权威域加权重排（docs/11 §3.2）。"""
+
+    def test_official_doc_floats_to_front(self):
+        results = [
+            {"title": "博客", "url": "https://blog.csdn.net/x/y", "snippet": "s"},
+            {"title": "官方", "url": "https://docs.python.org/3/library/io.html", "snippet": "s"},
+        ]
+        out = ws._apply_domain_policy(results)
+        assert "docs.python.org" in out[0]["url"]
+        assert out[0]["authority"] == 1.0
+
+    def test_stable_order_for_same_score(self):
+        # 同分（都未命中域表）保持引擎原序：curation 只保守干预
+        results = [
+            {"title": "a", "url": "https://unknown-a.example.com/x", "snippet": ""},
+            {"title": "b", "url": "https://unknown-b.example.com/y", "snippet": ""},
+        ]
+        out = ws._apply_domain_policy(results)
+        assert [r["title"] for r in out] == ["a", "b"]
+        assert all(r["authority"] == 0.0 for r in out)
+
+    def test_subdomain_matches_suffix(self):
+        assert ws._domain_weight("https://learn.microsoft.com/zh-cn/dotnet/") == 1.0
+        assert ws._domain_weight("https://zh.wikipedia.org/wiki/卷积") == 0.85
+
+    def test_garbage_url_scores_zero_without_crash(self):
+        assert ws._domain_weight("不是URL") == 0.0
+        assert ws._domain_weight("") == 0.0
+
+    def test_impl_output_carries_authority(self, monkeypatch):
+        monkeypatch.setattr(ws.settings, "tavily_api_key", "k", raising=False)
+        monkeypatch.setattr(
+            ws, "_search_tavily",
+            lambda q, k: [{"title": "T", "url": "https://arxiv.org/abs/1", "snippet": "s"}],
+        )
+        out = ws.web_search_impl("attention 论文", 3)
+        assert out["ok"] is True
+        assert out["results"][0]["authority"] == 1.0

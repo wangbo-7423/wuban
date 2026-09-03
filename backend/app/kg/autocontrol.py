@@ -1,10 +1,10 @@
 """《自动控制原理》知识图谱（可迁移性示例）。"""
 from __future__ import annotations
 
-from .base import KGNode
+from .base import KGNode, KeywordMatchMixin
 
 
-class AutoControlGraph:
+class AutoControlGraph(KeywordMatchMixin):
     course_id = "autocontrol"
     course_name = "自动控制原理"
     subject = "自动化"
@@ -27,9 +27,3 @@ class AutoControlGraph:
     def strategy_weights(self) -> dict[str, float]:
         # 抽象/动态系统 → 类比+可视化 高
         return {"类比": 1.0, "可视化": 1.0, "分解": 0.6, "反例": 0.7}
-
-    def match_node(self, text: str) -> str | None:
-        for node_id, kws in self._keywords.items():
-            if any(k in text for k in kws):
-                return node_id
-        return None

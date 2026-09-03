@@ -19,8 +19,9 @@ from app.skills.base import SkillSpec
 logger = logging.getLogger(__name__)
 
 # 已实现的场景；后续补齐 series / linear_algebra / probability 时在此追加。
-# project_guide 是横切任务型 skill（微项目提议），不绑定某一门学科。
-_SKILL_MODULES = ("calculus", "ode", "project_guide")
+# project_guide 是横切任务型 skill（微项目提议），不绑定某一门学科；
+# search_verify 是断言核实流水线（docs/11 §6.5），同样横切。
+_SKILL_MODULES = ("calculus", "ode", "project_guide", "search_verify")
 
 
 def _load_all() -> tuple[SkillSpec, ...]:

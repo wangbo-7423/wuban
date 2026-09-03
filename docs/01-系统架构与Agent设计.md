@@ -157,12 +157,17 @@ class KGNode:
     prerequisites: list[str]     # 前置节点 id（讲新概念前先补前置）
     abstract: bool = True        # 是否抽象（影响策略倾向）
     summary: str = ""            # 概念摘要（作为对话证据）
+    refs: list[str] = []         # 出处锚点（"CSAPP §9.3" 等，docs/11 §5）
+
+class KeywordMatchMixin:
+    """match_node 默认实现（base.py）：关键词表按「命中数→最长词」打分，
+    节点名/摘要分段兜底；新课程继承它即可，不再手写匹配。"""
 
 class KnowledgeGraph(Protocol):
     course_id: str; course_name: str; subject: str
     def nodes(self) -> dict[str, KGNode]: ...
     def strategy_weights(self) -> dict[str, float]: ...   # 四策略权重
-    def match_node(self, text: str) -> str | None: ...    # 关键词匹配
+    def match_node(self, text: str) -> str | None: ...    # 关键词匹配（mixin 默认实现）
 ```
 
 - **已注册课程**（`app/kg/__init__.py::COURSES`）：
@@ -173,8 +178,27 @@ class KnowledgeGraph(Protocol):
 | `autocontrol` | 自动控制原理 | 自动化 | 类比 + 可视化 高（传递函数/根轨迹抽象） |
 | `signals` | 信号与系统 | 电子信息 | 分解 + 可视化 高（卷积/频域结构复杂） |
 
-- **新增一门课** = 写一个 Graph 类（节点 + 权重 + 关键词匹配）+ 在 `COURSES` 注册一行，Agent 框架、工具、前端全部复用——这是「可迁移性」的落点。
+- **新增一门课** = 写一个 Graph 类（继承 `KeywordMatchMixin`，填节点 + 权重 + 关键词表）+ 在 `COURSES` 注册一行，Agent 框架、工具、前端全部复用——这是「可迁移性」的落点。
 - 当前 KG 作为**静态资料库**供 `kg_lookup` 检索，不参与调度决策；对话上下文中的 `course_id` 由前端随请求传入（默认 `general`）。
+- **`kg_lookup` 返回契约**（2026-09-02 查缺补漏后）：命中节点摘要 + **前置节点详解**（`prerequisite_details`：id/name/difficulty/summary，支持「先补前置再讲新概念」，不再返回裸 id）+ `strategy_weights`（学科策略权重经工具结果回注 GLM，模型自行参考——这是 pipeline_v1 归档后该配置的唯一消费路径）+ `refs`（教材出处锚点，docs/11 §5）。
+- **守门测试** `tests/test_kg.py`：前置 id 必须存在 / 无环 / 难度 1~5 且不倒挂（ZPD 语义）/ 四策略权重齐全 / 匹配语义冒烟（最长命中优先 + 名/摘要兜底）/ `kg_lookup` 返回形状。手写图谱的数据错误在 CI 拦下，不流进学生对话。
+
+### 6.1 知识架构定位：双层供给，GraphRAG 刻意不采纳
+
+系统的知识供给是**双层**的，各司其职、互不替代：
+
+| 层 | 内容 | 供给方式 | 消费方 |
+| --- | --- | --- | --- |
+| **静态课程 KG**（curated knowledge） | 人工策展的节点：难度 / 前置 / 摘要 / 四策略权重 | 代码内置，`kg_lookup` 关键词检索 | 定位学生卡点与前置缺失 |
+| **学生记忆图谱**（蒸馏记忆） | 对话中 GLM 异步抽取的实体 / 关系三元组 | MCP server-memory（每用户一个子进程，本地 JSONL 隔离） | `memory_search` 工具 + system prompt L0/L1 分层注入（docs/07） |
+
+**GraphRAG 评估后明确不采纳**（2026-09-02 决定，写进 docs/09 §5 不采纳清单）：
+
+1. **规模不匹配**：GraphRAG 的收益场景是「大规模文档语料的语义检索」——LLM 批量抽实体建索引、查询时跨社区多跳聚合。本项目没有这个前提：知识侧是百级节点的**人工策展**静态库（本就不需要 LLM 抽取），记忆侧是逐对话蒸馏的三元组（**写入即成图**，无需离线索引）。
+2. **负收益**：在上述规模上，GraphRAG 只会带来 token 成本（全语料 LLM 抽取）与索引维护复杂度，换不来任何检索质量提升——和「此规模上向量库负收益」（docs/07 §memory、docs/11 §5）是同一个判断。
+3. **答辩口径**：定位是「curated knowledge + 蒸馏记忆的双层知识供给」，不是「我们没做 GraphRAG」；若被问到，答案是**成熟架构判断**（成本收益 + 数据规模不匹配），并已留重估条件。
+
+**未来何时重估**：引入「学生上传整本教材 / 整套讲义」的大语料检索需求（docs/12 RAG 线），且实测出现 chunk-RAG 解决不了的跨文档多跳关联问题，再评估 GraphRAG 或更轻的 rerank 方案。
 
 ## 7. 配置与安全
 

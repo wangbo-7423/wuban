@@ -75,18 +75,26 @@ class Settings(BaseSettings):
     redis_url: str = ""          # 缓存 / 限流
     minio_endpoint: str = ""     # 对象存储（图片 / 附件）
     higress_gateway: str = ""    # MCP 网关（如未来要用 Higress）
-    enable_web_search: bool = False          # 是否启用 web_search 工具
+    # 默认开启（docs/11）：失败语义是结构化降级——全部后端不可用时返回
+    # ok=False + hint，GLM 用本地知识回应并声明确定度，绝不阻塞主链路。
+    # 部署在完全离线环境时可设回 False。
+    enable_web_search: bool = True
     # web_search 后端：优先 Tavily（配 key），否则 ddgs 多引擎（pip install ddgs）。
     # ddgs 的 backend 留空用 auto；国内网络不稳时可指定 "bing"。
     tavily_api_key: str = ""
     web_search_backend: str = "auto"
     enable_calculator: bool = True           # 数学习题，启用
     # 代码执行（工科微项目线核心）。默认开启：本项目的价值主张就是让学生把仿真/
-    # 脚本贴出来、AI 跑一遍给审阅式反馈。沙箱禁网络+禁系统命令+硬超时，仅适合
-    # 本地/受信环境；多租户生产请改用容器/gVisor/WASM，并设回 False。详见
-    # app/agent/code_runner.py 顶部安全模型说明。
+    # 脚本贴出来、AI 跑一遍给审阅式反馈。进程沙箱禁网络+禁系统命令+硬超时，仅适合
+    # 本地/受信环境；公网多租户必须 CODE_RUNNER_BACKEND=docker（容器级硬隔离）。
+    # 详见 docs/14-code_runner沙箱设计.md 与 app/agent/code_runner.py 顶部安全模型。
     enable_code_runner: bool = True
     code_runner_timeout: float = 15.0        # 单次代码执行硬超时（秒）
+    # 执行后端（docs/14-code_runner沙箱设计.md）：process = 子进程级（dev/受信环境，
+    # 默认）；docker = 容器级硬隔离（公网多租户用，宿主机需有 docker CLI）。
+    # 两个后端返回契约完全一致，切换零改动 tool 层。
+    code_runner_backend: str = "process"
+    code_runner_docker_image: str = "python:3.12-slim"  # 生产建议自建含 matplotlib 的镜像
 
     # ── MCP 记忆服务（官方 @modelcontextprotocol/server-memory）──
     # 每个用户一个 memory server 子进程，通过 MEMORY_FILE_PATH 隔离
@@ -129,7 +137,17 @@ class Settings(BaseSettings):
         if not (v.startswith("postgresql://") or v.startswith("postgresql+")):
             raise ValueError(
                 f"DATABASE_URL 必须是 PostgreSQL 协议，当前: {v[:32]}..."
+
             )
+        return v
+
+    @field_validator("code_runner_backend")
+    @classmethod
+    def _valid_runner_backend(cls, v: str) -> str:
+        """执行后端只允许 process / docker（写错直接启动失败，不静默回落）。"""
+        v = (v or "").strip().lower()
+        if v not in ("process", "docker"):
+            raise ValueError(f"CODE_RUNNER_BACKEND 只支持 process|docker，当前: {v}")
         return v
 
     @field_validator("cors_origins", mode="before")

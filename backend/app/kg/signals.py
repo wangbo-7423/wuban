@@ -1,10 +1,10 @@
 """《信号与系统》知识图谱（可迁移性示例）。"""
 from __future__ import annotations
 
-from .base import KGNode
+from .base import KGNode, KeywordMatchMixin
 
 
-class SignalSystemGraph:
+class SignalSystemGraph(KeywordMatchMixin):
     course_id = "signals"
     course_name = "信号与系统"
     subject = "电子信息"
@@ -27,9 +27,3 @@ class SignalSystemGraph:
     def strategy_weights(self) -> dict[str, float]:
         # 结构复杂/数学性强 → 分解+可视化 高
         return {"分解": 1.0, "可视化": 1.0, "类比": 0.7, "反例": 0.5}
-
-    def match_node(self, text: str) -> str | None:
-        for node_id, kws in self._keywords.items():
-            if any(k in text for k in kws):
-                return node_id
-        return None

@@ -129,6 +129,66 @@ def _search_ddgs(query: str, top_k: int) -> list[dict[str, str]]:
 # 后端名称按优先级排列；执行时经 globals() 动态解析（便于测试替身按名替换）
 _PROVIDER_NAMES: tuple[str, ...] = ("tavily", "bing", "ddgs")
 
+# ── 检索 curation：权威域加权（docs/11 §3.2）────────────────────
+# 通用引擎对工科查询会混入资讯/内容农场；这里对结果按域打分重排，
+# 让官方文档/教材/论文/问答站排到窗口前排。分数进返回值（authority 字段），
+# cards.py 拿它当 evidence.confidence，遥测拿它算「权威域占比」。
+# 设计约束：静态表 + 纯函数，不引第三方依赖；未命中域按 0 分保持原序。
+_DOMAIN_WEIGHTS: tuple[tuple[str, float], ...] = (
+    # 语言/库/标准官方文档（engineering 场景最有用的来源）
+    ("docs.python.org", 1.0), ("numpy.org", 1.0),
+    ("scipy.org", 1.0), ("matplotlib.org", 1.0), ("pytorch.org", 1.0),
+    ("tensorflow.org", 1.0), ("cppreference.com", 1.0), ("rust-lang.org", 1.0),
+    ("go.dev", 1.0), ("gnu.org", 1.0), ("kernel.org", 1.0), ("man7.org", 1.0),
+    ("developer.mozilla.org", 1.0), ("mdn.dev", 1.0), ("w3.org", 1.0),
+    ("sqlite.org", 1.0), ("postgresql.org", 1.0), ("mysql.com", 1.0),
+    ("docker.com", 1.0), ("git-scm.com", 1.0), ("llvm.org", 1.0),
+    ("microsoft.com", 0.9), ("learn.microsoft.com", 1.0),
+    # 论文 / 会议 / 学术
+    ("arxiv.org", 1.0), ("acm.org", 1.0), ("ieee.org", 0.95),
+    ("springer.com", 0.9), ("sciencedirect.com", 0.9), ("doi.org", 0.9),
+    # 大学 / 课程（edu 域整体权威）
+    (".edu.cn", 0.9), (".edu", 0.9), ("ocw.mit.edu", 1.0),
+    # 百科 / 问答（概念场景主力；问答站算法题质量高但别当唯一依据）
+    ("wikipedia.org", 0.85), ("zh.wikipedia.org", 0.85),
+    ("stackoverflow.com", 0.85), ("stackexchange.com", 0.85),
+    # 通用技术社区（混合质量：可参考不优先）
+    ("github.com", 0.7), ("github.io", 0.75), ("readthedocs.io", 0.8),
+    ("cnblogs.com", 0.5), ("juejin.cn", 0.5), ("segmentfault.com", 0.6),
+    ("zhihu.com", 0.4), ("zhuanlan.zhihu.com", 0.4), ("csdn.net", 0.3),
+    ("blog.csdn.net", 0.3), ("baijiahao.baidu.com", 0.1),
+    ("cloud.tencent.com", 0.5), ("jianshu.com", 0.3),
+)
+
+
+def _domain_weight(url: str) -> float:
+    """URL → 权威分。按最长匹配后缀取分（learn.microsoft.com 优先于 microsoft.com）。"""
+    try:
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+    except ValueError:
+        return 0.0
+    best = 0.0
+    for suffix, w in _DOMAIN_WEIGHTS:
+        if host == suffix or host.endswith("." + suffix) or host.endswith(suffix):
+            best = max(best, w)
+    return best
+
+
+def _apply_domain_policy(results: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """按权威分稳定重排（同分保持引擎原序），并给每条标注 authority 档位。
+
+    稳定排序很重要：引擎自己的相关度在同分域之间仍然有效，这里只做
+    「把官方来源捞到前排」的保守干预，不做激进过滤（宁可有噪声，不空窗）。
+    """
+    scored = [(_domain_weight(r.get("url") or ""), i, r) for i, r in enumerate(results)]
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    out: list[dict[str, Any]] = []
+    for w, _i, r in scored:
+        item = dict(r)
+        item["authority"] = round(w, 2)
+        out.append(item)
+    return out
+
 
 def web_search_impl(query: str, top_k: int = 5) -> dict[str, Any]:
     """tools.web_search 的实现。永不抛异常，失败返回结构化错误。"""
@@ -153,15 +213,19 @@ def web_search_impl(query: str, top_k: int = 5) -> dict[str, Any]:
             "ok": True,
             "provider": name,
             "query": query,
-            # 聚合层统一裁剪：不管后端实现如何，进窗口的结果一定有界
-            "results": [
-                {
-                    "title": _clip(r.get("title", ""), 100),
-                    "url": (r.get("url") or "").strip(),
-                    "snippet": _clip(r.get("snippet", "")),
-                }
-                for r in results
-            ],
+            # 聚合层统一裁剪：不管后端实现如何，进窗口的结果一定有界。
+            # 裁剪后走域策略重排：官方来源捞前排 + authority 档位随行
+            # （cards.py 转成 evidence.confidence，遥测算权威域占比）。
+            "results": _apply_domain_policy(
+                [
+                    {
+                        "title": _clip(r.get("title", ""), 100),
+                        "url": (r.get("url") or "").strip(),
+                        "snippet": _clip(r.get("snippet", "")),
+                    }
+                    for r in results
+                ]
+            ),
         }
 
     return {

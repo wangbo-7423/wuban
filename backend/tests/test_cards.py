@@ -16,12 +16,6 @@ from app.agent.cards import (
 from app.agent.orchestrator import AgentResult
 
 
-def _fake_llm(content: str):
-    return SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
-    )
-
-
 def _result(text: str = "回答正文") -> AgentResult:
     return AgentResult(
         text=text,
@@ -128,7 +122,7 @@ class TestFormatCards:
         def _boom(*a, **k):
             raise RuntimeError("GLM down")
 
-        monkeypatch.setattr(cards_mod.glm_client, "chat", _boom)
+        monkeypatch.setattr(cards_mod.glm_client, "chat_structured", _boom)
         out = format_cards(_result("正文"), user_text="q", course_id="math")
         assert len(out) == 1
         assert out[0].text == "正文"
@@ -148,8 +142,8 @@ class TestFormatCards:
         }
         monkeypatch.setattr(
             cards_mod.glm_client,
-            "chat",
-            lambda *a, **k: _fake_llm(json.dumps(payload, ensure_ascii=False)),
+            "chat_structured",
+            lambda *a, **k: SimpleNamespace(cards=payload["cards"]),
         )
         out = format_cards(_result("原文"), user_text="q", course_id="math")
         assert [c.card_type for c in out] == ["math", "question"]
@@ -157,8 +151,75 @@ class TestFormatCards:
     def test_llm_empty_cards_falls_back(self, monkeypatch):
         monkeypatch.setattr(
             cards_mod.glm_client,
-            "chat",
-            lambda *a, **k: _fake_llm('{"cards": []}'),
+            "chat_structured",
+            lambda *a, **k: SimpleNamespace(cards=[]),
         )
         out = format_cards(_result("正文"), user_text="q", course_id="math")
         assert len(out) == 1
+
+
+def _result_with_search() -> AgentResult:
+    """带 web_search 留痕的 AgentResult：两域命中 + 一个失败调用。"""
+    return AgentResult(
+        text="结论正文",
+        tool_calls=[
+            {
+                "tool_name": "web_search",
+                "args": {"query": "numpy 2.0 changes"},
+                "ok": True,
+                "result": {
+                    "ok": True,
+                    "provider": "tavily",
+                    "results": [
+                        {"title": "NumPy 2.0 release notes", "url": "https://numpy.org/doc/2.0/", "snippet": "s", "authority": 1.0},
+                        {"title": "博客转载", "url": "https://blog.csdn.net/a/b", "snippet": "s", "authority": 0.3},
+                        {"title": "同域第二条", "url": "https://numpy.org/other", "snippet": "s", "authority": 1.0},
+                        {"title": "无URL", "url": "", "snippet": "s", "authority": 0},
+                    ],
+                },
+            },
+            {
+                "tool_name": "web_search",
+                "args": {"query": "x"},
+                "ok": False,
+                "result": {"ok": False, "error": "所有后端不可用"},
+            },
+        ],
+    )
+
+
+class TestWebEvidence:
+    def test_dedup_domains_and_cap_three(self):
+        ev = cards_mod._web_evidence(_result_with_search())
+        domains = [e["source"] for e in ev]
+        assert domains == ["numpy.org", "blog.csdn.net"]  # 去重 + 跳过空 url
+        assert ev[0]["confidence"] == 1.0
+
+    def test_failed_search_ignored(self):
+        r = AgentResult(text="t", tool_calls=[
+            {"tool_name": "web_search", "args": {}, "ok": False, "result": {"ok": False, "results": [
+                {"title": "x", "url": "https://arxiv.org/a", "authority": 1.0}]}},
+        ])
+        assert cards_mod._web_evidence(r) == []
+
+    def test_merge_appends_card_evidence_models(self):
+        from app.schemas.card import CardEvidence
+        card = _parse_card({"card_type": "understand", "text": "正文",
+                            "evidence": [{"source": "kg:os", "confidence": 1.0}]})
+        out = cards_mod._merge_evidence(card, cards_mod._web_evidence(_result_with_search()))
+        assert all(isinstance(e, CardEvidence) for e in out.evidence)
+        sources = [e.source for e in out.evidence]
+        assert sources[0] == "kg:os"          # 既有 KG 来源保留在前
+        assert "numpy.org" in sources          # 搜索来源并入
+        assert len(out.evidence) <= 5
+
+    def test_format_cards_merges_into_primary(self, monkeypatch):
+        monkeypatch.setattr(
+            cards_mod.glm_client, "chat_structured",
+            lambda *a, **k: SimpleNamespace(
+                cards=[{"card_type": "understand", "text": "正文"}]
+            ),
+        )
+        out = format_cards(_result_with_search(), user_text="q", course_id="os")
+        assert len(out) == 1
+        assert any(e.source == "numpy.org" for e in (out[0].evidence or []))

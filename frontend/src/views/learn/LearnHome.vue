@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * 学习主界面（新）
- * - 顶栏：品牌 / 课程 + 进度 / 抽屉触发按钮 / 用户操作
+ * - 顶栏：品牌 / 课程（仅绑定具体课程时显示）/ 抽屉触发按钮 / 用户操作
  * - 主体：左侧「对话抽屉」+ 中间「聊天区」+ 右侧「学习状态抽屉」
  */
 import { onMounted, computed } from 'vue'
@@ -26,22 +26,14 @@ onMounted(() => {
 })
 
 const displayName = computed(() => auth.nickname || auth.role || '同学')
-// 进度/复习到期来自 ChatOut.updated_context 回推与 GET /student/context，
-// mastery 是过程性探索深度估计值，不是考试分数
-const hasProgressData = computed(() => {
-  const m = (learn.context?.mastery || {}) as Record<string, number>
-  const due = learn.context?.review_due || []
-  return Object.keys(m).length > 0 || due.length > 0
+// "general"/缺失 = 未绑定具体课程的综合模式，不是课程名，顶栏不展示。
+// 刻意不展示「进度/掌握度」类数字（docs/00 §6：探索循环，不是测验循环，
+// 过程性深度估计值不适合以百分数形式呈现）；复习入口收在右侧学习状态抽屉。
+const courseName = computed(() => learn.context?.course?.name || '')
+const hasCourse = computed(() => {
+  const id = learn.context?.course?.id || ''
+  return !!courseName.value && id !== '' && id !== 'general'
 })
-const progress = computed(() => {
-  const m = (learn.context?.mastery || {}) as Record<string, number>
-  const vals = Object.values(m)
-  if (!vals.length) return 0
-  return Math.round(
-    vals.reduce((a, b) => a + b, 0) / vals.length * 100,
-  )
-})
-const dueCount = computed(() => (learn.context?.review_due || []).length)
 </script>
 
 <template>
@@ -72,20 +64,7 @@ const dueCount = computed(() => (learn.context?.review_due || []).length)
       </div>
 
       <div class="center">
-        <span class="course-name">{{
-          learn.context?.course?.name || '课程'
-        }}</span>
-        <template v-if="hasProgressData">
-          <el-tag size="small" type="success">进度 {{ progress }}%</el-tag>
-          <el-tag
-            size="small"
-            :type="dueCount ? 'warning' : 'info'"
-            class="due-tag"
-            @click="dueCount && learn.toggleRight(true)"
-          >
-            复习到期 {{ dueCount }}
-          </el-tag>
-        </template>
+        <span v-if="hasCourse" class="course-name">{{ courseName }}</span>
       </div>
 
       <div class="right">
@@ -237,9 +216,6 @@ const dueCount = computed(() => (learn.context?.review_due || []).length)
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.due-tag {
-  cursor: pointer;
 }
 .icon-btn {
   width: 34px;

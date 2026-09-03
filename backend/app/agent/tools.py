@@ -112,7 +112,12 @@ def calculator(expression: str) -> dict[str, Any]:
 
 
 def kg_lookup(course_id: str, query: str) -> dict[str, Any]:
-    """从静态 KG 匹配节点（按关键词）。仅当 settings 启用的 KG 存在时返回节点摘要。"""
+    """从静态 KG 匹配节点（关键词表优先，节点名/摘要兜底）。
+
+    返回：命中节点摘要 + **前置节点详解**（id/name/difficulty/summary，
+    供「先补前置再讲新概念」直接引用）+ 学科策略权重（GLM 参考，自行决定
+    引导倾向，不做硬约束）+ refs 出处锚点（教材章节，自然引用零版权风险）。
+    """
     try:
         from app.kg import get_kg
         kg = get_kg(course_id)
@@ -124,6 +129,15 @@ def kg_lookup(course_id: str, query: str) -> dict[str, Any]:
     if not node_id:
         return {"ok": True, "matched": None, "course": kg.course_name}
     n = nodes[node_id]
+    prereq_details = [
+        {
+            "id": p.id,
+            "name": p.name,
+            "difficulty": p.difficulty,
+            "summary": p.summary,
+        }
+        for p in (nodes[pid] for pid in n.prerequisites if pid in nodes)
+    ]
     return {
         "ok": True,
         "matched": {
@@ -131,8 +145,11 @@ def kg_lookup(course_id: str, query: str) -> dict[str, Any]:
             "name": n.name,
             "difficulty": n.difficulty,
             "prerequisites": n.prerequisites,
+            "prerequisite_details": prereq_details,
             "summary": n.summary,
+            "refs": n.refs,
         },
+        "strategy_weights": kg.strategy_weights(),
         "course": kg.course_name,
     }
 
@@ -451,8 +468,9 @@ def _kg_lookup_schema() -> dict[str, Any]:
         "function": {
             "name": "kg_lookup",
             "description": (
-                "在指定课程知识图谱里按文本模糊匹配节点，返回节点摘要和前置节点。"
-                "用于定位学生可能卡在哪一个概念。"
+                "在指定课程知识图谱里匹配概念节点，返回节点摘要、前置节点详解"
+                "（学生可能缺的前置知识，应先补前置再讲新概念）、本学科引导策略权重"
+                "和教材出处。用于定位学生可能卡在哪一个概念、讲新概念前查前置。"
             ),
             "parameters": {
                 "type": "object",
@@ -571,12 +589,18 @@ def _build_registry() -> tuple[ToolSpec, ...]:
         specs.append(
             ToolSpec(
                 name="web_search",
-                description="联网搜索",
+                description=(
+                    "联网搜索：核实可检验的客观事实（库/框架版本与 API 变更、"
+                    "发布日期、论文/著作归属、官方语法），不用于概念讲解本身"
+                ),
                 enabled=True,
                 schema=_web_search_schema(),
                 func=web_search,
-                scenes=("concept",),
+                # concept 查出处、engineering 查版本/API——后者是本地知识
+                # 最不可靠、搜索收益最高的场景（docs/11 §3.1）
+                scenes=("concept", "engineering"),
                 digest_fields=("results",),
+                guide="guide_search.md",
             )
         )
 

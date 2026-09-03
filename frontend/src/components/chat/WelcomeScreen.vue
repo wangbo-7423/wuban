@@ -18,6 +18,12 @@ const learn = useLearnStore()
 
 const courseName = computed(() => learn.context?.course?.name || '')
 const courseGoal = computed(() => learn.context?.course?.goal || '')
+// "general"（或缺失）是「未绑定具体课程」的综合模式兜底，不是一门课，
+// 不能冠以「当前课程」展示；只有 os/autocontrol/signals 这类真实课程才显示
+const hasCourse = computed(() => {
+  const id = learn.context?.course?.id || ''
+  return !!courseName.value && id !== '' && id !== 'general'
+})
 
 interface Suggestion {
   icon: string
@@ -68,9 +74,9 @@ const suggestions = computed<Suggestion[]>(() => [
         你好，我是你的
         <span class="brand">AI 伴学</span>
       </h1>
-      <p v-if="courseName || courseGoal" class="sub">
-        <template v-if="courseName">本节课：<b>{{ courseName }}</b></template>
-        <template v-if="courseGoal">{{ courseName ? ' · ' : '' }}{{ courseGoal }}</template>
+      <p v-if="hasCourse || courseGoal" class="sub">
+        <template v-if="hasCourse">当前课程：<b>{{ courseName }}</b></template>
+        <template v-if="courseGoal">{{ hasCourse ? ' · ' : '' }}{{ courseGoal }}</template>
       </p>
       <p class="hint">
         从下方选一个起点开始，或直接在下方输入框提问 👇

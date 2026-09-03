@@ -11,18 +11,26 @@ ChoiceCard / RecommendationCard）」的关键：只要 GLM 在此打出对应 c
 """
 from __future__ import annotations
 
-import json
 import logging
-import re
 import uuid
+import urllib.parse
 from datetime import datetime, timezone
 from typing import Any
 
+from pydantic import BaseModel, Field
+
 from app.agent import glm_client
 from app.agent.orchestrator import AgentResult
-from app.schemas.card import CardMessage, CardPayload
+from app.schemas.card import CardEvidence, CardMessage, CardPayload
 
 logger = logging.getLogger(__name__)
+
+
+class _CardsEnvelope(BaseModel):
+    """切卡结果的信封 schema：只锁「cards 是对象数组」这一层形状，
+    字段级容错清洗仍归 _parse_card（枚举拼错不该触发重试，该清空保卡）。"""
+
+    cards: list[dict[str, Any]] = Field(default_factory=list)
 
 _FORMAT_SYSTEM = """你是「AI 伴学」的卡片格式化器。下面会给你一段助手的回答原文，以及它调用过的工具结果摘要。
 请把这段回答拆成 1~3 张结构化卡片（CardMessage），供前端渲染。
@@ -31,7 +39,7 @@ _FORMAT_SYSTEM = """你是「AI 伴学」的卡片格式化器。下面会给你
 text / question / understand / math / engineering / practice / choice / recommendation / feedback / evidence / progress / warning / metacog / motivation / scaffold_progress / tool_call
 
 # 切卡规则
-- 含数学推导（公式/积分/极限/矩阵）→ 用 `math` 卡，payload.math={problem, steps:[{expr,note}], answer, unit}；expr 用 LaTeX，如 "\\frac{a}{b}"、"\\int_0^1 x^2 dx"。
+- 含数学推导（公式/积分/极限/矩阵）→ 用 `math` 卡，payload.math={problem, steps:[{expr,note}], answer, unit}；expr 用 LaTeX，如 "\\frac{a}{b}"、"\\int_0^1 x^2 dx"。note 只用通俗文字说明这一步在做什么、为什么这么做，公式一律放 expr（note 里不写 LaTeX，需要提公式时用文字描述，如「用幂函数积分公式」）。
 - 含工程实操步骤（命令/注意事项）→ 用 `engineering` 卡，payload.engineering_steps=[{title, command, expected, pitfalls, next_step_hint}]。
 - 学生贴了代码、你用 code_runner 跑过 → 用 `feedback` 卡给审阅式反馈（先肯定、再指出可改处并说明原因、不打分）；若 code_runner 生成了图表 URL，把 url 列表放进 payload.engineering_artifacts=[{type:"image", url:"..."}]，让学生直接看到运行结果图。
 - 你用 project_guide 提议了微项目 → 用 `recommendation` 卡，payload.options=[{value, label}]，label 写项目名称+耗时，reason 写为什么适合。
@@ -121,12 +129,9 @@ def _summarize_tools(result: AgentResult) -> str:
 
 
 def _extract_json(text: str) -> dict[str, Any]:
-    """从 GLM 输出里抽出 JSON 对象（兼容 ```json 围栏与裸 JSON）。"""
-    t = (text or "").strip()
-    if t.startswith("```"):
-        t = re.sub(r"^```[a-zA-Z]*\n?", "", t)
-        t = re.sub(r"\n?```$", "", t).strip()
-    return json.loads(t)
+    """围栏兼容的 JSON 抽取——实现已上收到 glm_client.extract_json_object，
+    这里保留别名供既有调用/测试引用。"""
+    return glm_client.extract_json_object(text)
 
 
 def format_cards(
@@ -140,28 +145,95 @@ def format_cards(
         f"工具调用摘要：\n{_summarize_tools(result)}"
     )
     try:
-        resp = glm_client.chat(
+        data = glm_client.chat_structured(
             messages=[
                 {"role": "system", "content": _FORMAT_SYSTEM},
                 {"role": "user", "content": prompt},
             ],
-            response_format={"type": "json_object"},
+            schema=_CardsEnvelope,
+            fix_attempts=1,  # 形状散架给一次自纠；字段级容错在 _parse_card，不靠重试
             enable_thinking=False,
             # 切卡是纯结构化后处理，不需要深度推理；glm-5.3 关不掉思考，
             # 只能把档位压到 low——这一步跑在 SSE 结束后，慢一秒用户就多等一秒。
             reasoning_effort="low",
             temperature=0.2,
         )
-        content = resp.choices[0].message.content or ""
-        data = _extract_json(content)
-        cards_raw = data.get("cards") or []
+        cards_raw = data.cards
         cards = [_parse_card(c) for c in cards_raw]
         cards = [c for c in cards if c is not None]
         if cards:
+            # 搜索引用确定性落卡（docs/11 §3.4）：不指望切卡模型自觉转述，
+            # 本轮 web_search 命中的官方来源直接合并进主卡 evidence[]
+            web_ev = _web_evidence(result)
+            if web_ev:
+                cards[0] = _merge_evidence(cards[0], web_ev)
             return cards
     except Exception as e:  # noqa: BLE001
         logger.warning("format_cards 失败，回退单卡: %s", e)
+    # 切卡失败走兜底单卡，搜索来源同样落卡（evidence 不依赖切卡模型的自觉）
+    web_ev = _web_evidence(result)
+    if web_ev:
+        return [_merge_evidence(_fallback_card(result), web_ev)]
     return [_fallback_card(result)]
+
+
+def _web_evidence(result: AgentResult) -> list[dict[str, Any]]:
+    """本轮 web_search 的命中 → evidence 条目（域去重，最多 3 条）。
+
+    只取 ok=True 的调用；source 存域名的可读形式，title 进 page 字段，
+    authority（web_search 域策略打的权威分）直接当 confidence——
+    前端来源角标会把分数一并渲染，学生能看出「这是官方源还是博客」。
+    """
+    out: list[dict[str, Any]] = []
+    seen_domains: set[str] = set()
+    for tc in result.tool_calls:
+        if tc.get("tool_name") != "web_search" or not tc.get("ok"):
+            continue
+        r = tc.get("result") or {}
+        for item in (r.get("results") or []):
+            if len(out) >= 3:
+                return out
+            url = str(item.get("url") or "").strip()
+            if not url:
+                continue
+            try:
+                domain = (urllib.parse.urlparse(url).hostname or "").lower()
+            except ValueError:
+                continue
+            if not domain or domain in seen_domains:
+                continue
+            seen_domains.add(domain)
+            out.append(
+                {
+                    "source": domain,
+                    "page": (str(item.get("title") or "")[:60] or None),
+                    "confidence": float(item.get("authority") or 0.5),
+                }
+            )
+    return out
+
+
+def _merge_evidence(card: CardMessage, extra: list[dict[str, Any]]) -> CardMessage:
+    """把搜索来源并入卡片的 evidence[]（与既有来源按域去重，总量封顶 5）。
+
+    既有条目是 CardEvidence 模型（构造时经 pydantic 校验），新条目同样
+    构造成模型再追加，保持整卡类型一致。
+    """
+    existing = list(card.evidence or [])
+
+    def _src(e: Any) -> str:
+        if isinstance(e, dict):
+            return str(e.get("source") or "").lower()
+        return str(getattr(e, "source", "") or "").lower()
+
+    have = {_src(e) for e in existing}
+    for ev in extra:
+        if ev["source"] in have:
+            continue
+        existing.append(CardEvidence(**ev))
+        have.add(ev["source"])
+    card.evidence = existing[:5] or None
+    return card
 
 
 _VALID_SCAFFOLD = {"example", "faded", "hint", "independent"}

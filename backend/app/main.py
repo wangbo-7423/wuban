@@ -22,18 +22,19 @@ from app.api.memory import router as memory_router
 from app.api.student import router as student_router
 from app.api.upload import router as upload_router
 from app.core.config import settings
-from app.core.db import init_db
+from app.core.db import run_migrations
 from app.core.exceptions import register_exception_handlers
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动钩子：建表（仅本地）。生产请用 Alembic 迁移。
+    # 启动钩子：Alembic 迁移到最新 schema（dev / 生产同一条路径）。
+    # 数据库暂不可达时只告警不阻塞启动（docker restart 场景由重试兜底）。
     try:
-        init_db()
+        run_migrations()
     except Exception as e:  # noqa: BLE001
         import logging
-        logging.getLogger(__name__).warning("init_db() 失败（可能是迁移期）：%s", e)
+        logging.getLogger(__name__).warning("alembic upgrade head 失败（数据库可能未就绪）：%s", e)
     yield
 
 

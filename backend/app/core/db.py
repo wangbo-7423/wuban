@@ -2,28 +2,27 @@
 
 设计要点：
 - **只连 PostgreSQL**：不提供 SQLite 兜底，避免开发用 SQLite / 生产错连；
-- 启动期 `init_db()` 仅用于本地开发（`create_all`），生产请用 Alembic 迁移；
+- **schema 演进唯一路径是 Alembic**：启动期 `run_migrations()` 等价于
+  `alembic upgrade head`（2026-09-02 起取代旧 `init_db()` 的 create_all +
+  手写补列 hack——那套做法在 agent_telemetry 上攒出了 nullable 漂移和
+  messages 外键丢 CASCADE 的真实债务，见迁移 b128f66432fa）；
 - `get_session` 是 FastAPI 依赖项，每个请求一个 Session，结束关闭。
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from sqlalchemy import create_engine
-from sqlalchemy.engine import URL
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from app.core.config import settings
 
+# backend/ 目录（app/core/db.py 上两级）
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+
 
 class Base(DeclarativeBase):
     """所有 ORM 模型基类。"""
-
-
-def _build_engine_url(database_url: str) -> URL | str:
-    """构造 SQLAlchemy 连接 URL。
-
-    SQLAlchemy 2.x 同时支持 str 和 URL；保持 str 与原有调用方式一致。
-    """
-    return database_url
 
 
 engine = create_engine(
@@ -43,12 +42,25 @@ SessionLocal = sessionmaker(
 )
 
 
-def init_db() -> None:
-    """建表（仅本地开发用）。生产请改 Alembic 迁移。"""
-    # 触发 ORM 模型注册到 Base.metadata
-    import app.models  # noqa: F401
+def run_migrations() -> None:
+    """把数据库升级到最新 schema（等价 CLI：`alembic upgrade head`）。
 
-    Base.metadata.create_all(bind=engine)
+    用 Alembic 的 Python API 在应用启动时执行，dev / 生产同一条路径。
+    URL 与 target_metadata 都由 migrations/env.py 从 settings / Base 读取，
+    这里只负责触发，不重复配置（单一配置源）。
+    """
+    from alembic import command
+    from alembic.config import Config
+
+    alembic_ini = BACKEND_DIR / "alembic.ini"
+    cfg = Config(str(alembic_ini))
+    # ini 用 %(here)s 定位 migrations/，显式兜底防止工作目录漂移
+    cfg.set_main_option(
+        "script_location", str((BACKEND_DIR / "migrations").resolve())
+    )
+    # 由应用自身调用时不要让 env.py 的 fileConfig 重置全局日志配置
+    cfg.attributes["configure_logger"] = False
+    command.upgrade(cfg, "head")
 
 
 def get_session():
