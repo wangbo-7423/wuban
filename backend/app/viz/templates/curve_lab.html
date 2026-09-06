@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>曲线实验台</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    background: #fbfcfe; color: #1f2937;
+    padding: 14px 16px 12px; user-select: none;
+  }
+  .expr {
+    font-size: 13px; color: #334155; background: #eef4ff;
+    border: 1px solid #dbeafe; border-radius: 7px;
+    padding: 6px 10px; margin-bottom: 10px;
+    font-family: "Cambria Math", Georgia, serif; font-style: italic;
+    overflow-x: auto; white-space: nowrap;
+  }
+  .expr .eq { font-style: normal; color: #64748b; margin-right: 6px; }
+  .row { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .row label { font-size: 13px; color: #4b5563; white-space: nowrap; min-width: 64px; }
+  .row b { font-size: 14px; color: #2563eb; min-width: 52px; text-align: right; }
+  input[type="range"] { flex: 1; accent-color: #2563eb; }
+  canvas { width: 100%; height: 220px; display: block; background: #fff;
+           border: 1px solid #e5e7eb; border-radius: 8px; }
+  .axis { display: flex; justify-content: space-between; margin-top: 5px;
+          font-size: 11px; color: #9ca3af; }
+</style>
+</head>
+<body>
+  <div class="expr"><span class="eq">y =</span><span id="exprText"></span></div>
+  <div id="sliders"></div>
+  <canvas id="cv"></canvas>
+  <div class="axis"><span id="xMinLab"></span><span id="xLabel"></span><span id="xMaxLab"></span></div>
+<script>
+window.__VIZ_PARAMS__ = __VIZ_PARAMS__;
+window.__VIZ_EVAL_FN__ = __VIZ_EVAL_FN__;
+</script>
+<script>
+(function () {
+  var P = window.__VIZ_PARAMS__ || {};
+  var FN = window.__VIZ_EVAL_FN__;
+  var XR = (P.x_range && P.x_range.length === 2 &&
+            isFinite(P.x_range[0]) && isFinite(P.x_range[1]) && P.x_range[1] > P.x_range[0])
+           ? [+P.x_range[0], +P.x_range[1]] : [0, 10];
+  var N = 400;  // 采样点数：重算全曲线仅需毫秒级
+
+  // 表达式只写进 textContent（不经 HTML），杜绝注入
+  document.getElementById("exprText").textContent = String(P.expr || "");
+  document.getElementById("xLabel").textContent = String(P.x_label || "");
+  document.getElementById("xMinLab").textContent = XR[0];
+  document.getElementById("xMaxLab").textContent = XR[1];
+
+  var SL = [];
+  var sliderBox = document.getElementById("sliders");
+  (P.sliders || []).slice(0, 5).forEach(function (s) {
+    if (!s || typeof s.key !== "string" || !isFinite(+s.min) || !isFinite(+s.max) || +s.max <= +s.min) return;
+    var st = {
+      key: s.key, min: +s.min, max: +s.max,
+      step: isFinite(+s.step) && +s.step > 0 ? +s.step : (+s.max - +s.min) / 100,
+      val: 0
+    };
+    var dflt = isFinite(+s.default) ? +s.default : (st.min + st.max) / 2;
+    st.val = Math.min(st.max, Math.max(st.min, dflt));
+    var inp = document.createElement("input");
+    inp.type = "range"; inp.min = st.min; inp.max = st.max; inp.step = st.step; inp.value = st.val;
+    var out = document.createElement("b");
+    function fmt(v) {
+      var d = st.step < 0.1 ? 2 : st.step < 1 ? 1 : 0;
+      return (+v).toFixed(d);
+    }
+    out.textContent = fmt(st.val);
+    inp.addEventListener("input", function () {
+      st.val = +inp.value; out.textContent = fmt(st.val); draw();
+    });
+    var row = document.createElement("div"); row.className = "row";
+    var lab = document.createElement("label");
+    lab.textContent = (s.label ? String(s.label) : s.key).slice(0, 20);
+    row.appendChild(lab); row.appendChild(inp); row.appendChild(out);
+    sliderBox.appendChild(row);
+    SL.push({ st: st, inp: inp });
+  });
+
+  var cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+
+  function sample() {
+    var vals = SL.map(function (s) { return s.st.val; });
+    var xs = new Array(N), ys = new Array(N);
+    for (var i = 0; i < N; i++) {
+      var x = XR[0] + (XR[1] - XR[0]) * i / (N - 1);
+      var y = NaN;
+      try { y = FN.apply(null, [x].concat(vals)); } catch (e) { y = NaN; }
+      xs[i] = x; ys[i] = (typeof y === "number" && isFinite(y)) ? y : NaN;
+    }
+    return { xs: xs, ys: ys };
+  }
+
+  function draw() {
+    var dpr = window.devicePixelRatio || 1;
+    var w = cv.width = cv.clientWidth * dpr, h = cv.height = cv.clientHeight * dpr;
+    ctx.clearRect(0, 0, w, h);
+    var S = sample();
+    var pad = 14 * dpr, x0 = pad, x1 = w - pad, yTop = 12 * dpr, yBot = h - 12 * dpr;
+
+    // y 自适应：取有限值的 min/max，加 8% 余量；平线时给 ±1
+    var lo = Infinity, hi = -Infinity;
+    for (var i = 0; i < N; i++) {
+      if (!isNaN(S.ys[i])) { if (S.ys[i] < lo) lo = S.ys[i]; if (S.ys[i] > hi) hi = S.ys[i]; }
+    }
+    if (lo === Infinity) {
+      ctx.fillStyle = "#9ca3af"; ctx.font = (12 * dpr) + "px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("该参数组合下区间内无有效值，拖动滑块或检查定义域", w / 2, h / 2);
+      return;
+    }
+    var padY = (hi - lo) * 0.08 || 1;
+    lo -= padY; hi += padY;
+    function X(x) { return x0 + (x - XR[0]) / (XR[1] - XR[0]) * (x1 - x0); }
+    function Y(y) { return yBot - (y - lo) / (hi - lo) * (yBot - yTop); }
+
+    // 网格 + 零线
+    ctx.strokeStyle = "#f3f4f6"; ctx.lineWidth = 1;
+    for (var g = 1; g < 4; g++) {
+      var gy = yTop + (yBot - yTop) * g / 4;
+      ctx.beginPath(); ctx.moveTo(x0, gy); ctx.lineTo(x1, gy); ctx.stroke();
+    }
+    if (lo < 0 && hi > 0) {
+      ctx.strokeStyle = "#d1d5db";
+      ctx.beginPath(); ctx.moveTo(x0, Y(0)); ctx.lineTo(x1, Y(0)); ctx.stroke();
+    }
+
+    // 曲线（NaN 断开分段）
+    ctx.strokeStyle = "#2563eb"; ctx.lineWidth = 2 * dpr;
+    ctx.beginPath();
+    var pen = false;
+    for (var j = 0; j < N; j++) {
+      if (isNaN(S.ys[j])) { pen = false; continue; }
+      var px = X(S.xs[j]), py = Y(Math.max(lo, Math.min(hi, S.ys[j])));
+      if (!pen) { ctx.moveTo(px, py); pen = true; } else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+  }
+
+  window.addEventListener("resize", draw);
+  draw();
+})();
+</script>
+</body>
+</html>

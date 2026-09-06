@@ -212,7 +212,7 @@ def _history_to_messages(messages: list[Any], limit: int = 8) -> list[dict[str, 
 def _memory_context(user_id: str, user_text: str) -> str:
     """把学生记忆按「常驻 + 检索」两层注入 extra_system；失败降级为空。
 
-    - L0 常驻（每轮注入）：偏好/目标/误区——任何话题都用得上的「人格级」信息；
+    - L0 常驻（每轮注入）：偏好/目标/误区/兴趣——任何话题都用得上的「人格级」信息；
     - L1 检索（按需注入）：当前消息命中哪些已学概念，才带出该概念及其邻接关系。
       对应上下文工程的分层预算：图谱再大，记忆注入也稳定在窗口的 5~10%。
     """

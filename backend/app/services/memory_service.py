@@ -2,7 +2,7 @@
 
 三条链路：
 1. **读（聊天前）**：把记忆图谱按「上下文工程」拆两层注入 system prompt——
-   `get_persistent_digest()` 是 L0 常驻层（偏好/目标/误区，任何话题都用得上，每轮注入），
+   `get_persistent_digest()` 是 L0 常驻层（偏好/目标/误区/兴趣，任何话题都用得上，每轮注入），
    `get_relevant_digest()` 是 L1 检索层（当前消息命中的已学概念 + 一步邻接关系，按需注入）。
    图谱随对话增长，全量注入会膨胀成噪音，`get_digest()` 全量视图只留给 API/调试；
 2. **写（聊天后）**：`extract_and_write()` 用 GLM 从本轮对话抽取实体/关系，
@@ -30,7 +30,7 @@ from app.models.conversation import Conversation, Message
 logger = logging.getLogger(__name__)
 
 # 官方 server 是自由 schema；我们约束一个受控词表，保证图谱可按类型分组展示
-ENTITY_TYPES = ("概念", "误区", "偏好", "目标", "项目")
+ENTITY_TYPES = ("概念", "误区", "偏好", "目标", "项目", "兴趣")
 
 # 抽取上限：防止模型把一段对话抽成百科全书
 _MAX_ENTITIES_PER_TURN = 8
@@ -50,18 +50,30 @@ _ALIAS_PREFIX = "别名："  # 别名在图谱里的持久化约定：observatio
 
 _EXTRACT_SYSTEM = """你是学习记忆抽取器。从一段「AI 伴学」对话里抽取值得长期记住的知识图谱信息。
 
-只抽四类东西：
+只抽五类东西：
 1. **概念**：学生学过/问过的学科概念（名字用标准中文术语全称，如「傅里叶变换」「PID 控制器」）；
 2. **误区**：学生暴露出的具体理解错误或困惑（名字写成简短判断，如「混淆卷积与相关」）；
 3. **偏好**：学生的学习偏好信号（如「偏好图示讲解」「喜欢先看例子」）；
-4. **目标**：学生提到的学习目标/课程/考试（如「备考自动控制期末」）。
+4. **目标**：学生提到的学习目标/课程/考试（如「备考自动控制期末」）；
+5. **兴趣**：学生觉得有意思/好玩/让他眼睛一亮的概念或领域（如「觉得傅里叶变换有意思」）——
+   只有学生表达了兴趣或兴奋才抽，别替他决定什么有趣。
+
+三个值得单独留意的信号：
+- **自发关联**：学生**主动**把两个看似无关的东西连上（「诶这像不像……」「这不就是……吗」）
+  ——记一条 relationType 为「自发关联」的关系；这是最强的迁移证据。导师自己打的比方不算，
+  那是普通的「相关」；同一对实体记了「自发关联」就不要再记「相关」。
+- **表里反差探针（重要，优先级高于「不要硬凑」）**：导师的讲解里出现「表层无辜、深层荒诞」的
+  揭示式讲法（先正经立表层、再翻开深层）之后，学生的反应是重要的过程性证据——接住了
+  （会心、顺着玩梗、追问深层）就在**该概念的 observations** 里记一条「表里反差探针：接住」；
+  没接住（无反应、只问表面）记「表里反差探针：未接住」。
+- 兴趣实体经常由自发关联带出来：他主动连过去的那个东西，往往就是他感兴趣的。
 
 硬性规则：
 - 没有值得记的就返回空数组，**不要硬凑**；寒暄、一次性细节、纯计算过程不抽；
 - 实体名 ≤ 20 字；「概念」可带 0~2 个 aliases（英文缩写/口语叫法，如 FFT、傅氏变换、拉氏变换），其他类型不给；
 - observations 每条 ≤ 40 字、只写事实（如「学生初次接触该概念」「已能独立完成积分计算」「与 X 混淆过，已纠正」）；
-- entityType 只能是：概念 / 误区 / 偏好 / 目标；
-- relations 只连本次抽取的实体或「已知实体」列表里出现过的名字，relationType 用短词（如 前置依赖 / 包含 / 应用于 / 相关 / 易混淆 / 属于目标）；
+- entityType 只能是：概念 / 误区 / 偏好 / 目标 / 兴趣；
+- relations 只连本次抽取的实体或「已知实体」列表里出现过的名字，relationType 用短词（如 前置依赖 / 包含 / 应用于 / 相关 / 易混淆 / 属于目标 / 自发关联）；
 - 只输出 JSON，不要任何解释文字。"""
 
 _EXTRACT_TMPL = """课程上下文：{course}
@@ -105,9 +117,9 @@ def get_graph(user_id: str) -> dict[str, Any]:
 
 
 def get_persistent_digest(user_id: str) -> str | None:
-    """L0 常驻层：偏好 / 目标 / 误区，每轮固定注入（预算约 100~200 token）。
+    """L0 常驻层：偏好 / 目标 / 误区 / 兴趣，每轮固定注入（预算约 100~200 token）。
 
-    这三类是「人格级」信息——任何话题都用得上，所以常驻；
+    这四类是「人格级」信息——任何话题都用得上，所以常驻；
     学过的概念是「话题级」信息，交给 L1 按需检索，不在这里堆。
     """
     g = _read_graph_safe(user_id)
@@ -119,6 +131,7 @@ def get_persistent_digest(user_id: str) -> str | None:
 
     prefs = [e["name"] for e in by_type.get("偏好", [])][:5]
     goals = [e["name"] for e in by_type.get("目标", [])][:5]
+    interests = [e["name"] for e in by_type.get("兴趣", [])][:4]
     mis = by_type.get("误区", [])[:6]
 
     lines: list[str] = ["## 学生长期记忆（历史对话沉淀，常驻）"]
@@ -126,6 +139,8 @@ def get_persistent_digest(user_id: str) -> str | None:
         lines.append(f"- 偏好：{'、'.join(prefs)}")
     if goals:
         lines.append(f"- 目标：{'、'.join(goals)}")
+    if interests:
+        lines.append(f"- 觉得有意思的：{'、'.join(interests)}")
     if mis:
         lines.append("- 已发现的误区（讲解时注意避开/主动纠正）：")
         for e in mis:
@@ -136,6 +151,7 @@ def get_persistent_digest(user_id: str) -> str | None:
         return None
     lines.append(
         "（使用要求：自然衔接——贴合偏好、延续目标、避开已纠过的误区；"
+        "打比方时可优先往「觉得有意思的」方向连——那是他自己发现的乐趣，最容易被记住；"
         "不要机械复述这份清单，也不要主动提「记忆」的存在。"
         "他学过哪些概念不在本层，需要时用 memory_search 工具查询。）"
     )
@@ -230,10 +246,12 @@ def get_digest(user_id: str) -> str | None:
 
     prefs = [e["name"] for e in by_type.get("偏好", [])][:5]
     goals = [e["name"] for e in by_type.get("目标", [])][:5]
+    interests = [e["name"] for e in by_type.get("兴趣", [])][:4]
     pref_goal = "；".join(
         part for part in (
             f"偏好：{'、'.join(prefs)}" if prefs else "",
             f"目标：{'、'.join(goals)}" if goals else "",
+            f"觉得有意思的：{'、'.join(interests)}" if interests else "",
         ) if part
     )
     if pref_goal:
@@ -495,6 +513,10 @@ def _extract(
             logger.warning("记忆抽取 LLM 调用失败(第 %s 次): %s", attempt + 1, e)
             continue
         data = _parse_json(raw)
+        if isinstance(data, list):
+            # 模型偶尔把整体输出成顶层数组（只有实体列表）——归一化成 dict，
+            # 防止 apply_extraction 里 .get 崩掉整轮抽取（实链路实测出现过）
+            data = {"entities": data}
         if data is not None:
             return data
     return None

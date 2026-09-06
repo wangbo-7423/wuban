@@ -508,6 +508,90 @@ def _web_search_schema() -> dict[str, Any]:
     }
 
 
+def _viz_brief() -> str:
+    """可用可视化模板一句话清单（进工具描述，registry 懒构建时才 import）。"""
+    from app.viz import builder as _viz
+    return _viz.template_brief()
+
+
+def make_visual(
+    template: str,
+    title: str | None = None,
+    preview_text: str | None = None,
+    probe_question: str | None = None,
+    reveal_hint: str | None = None,
+    params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """生成交互可视化卡（模板填参，docs/16）。
+
+    给 GLM 的观察只回小结——HTML 不进模型上下文；切卡阶段（cards.py）用工具
+    留痕的相同参数从模板重建（确定性等价）。频控（每轮 1 张）在切卡侧执行。
+    """
+    from app.viz import builder as _viz
+    try:
+        payload = _viz.build(
+            template, params=params, title=title, preview_text=preview_text,
+            probe_question=probe_question, reveal_hint=reveal_hint,
+        )
+    except _viz.VizError as e:
+        return {"ok": False, "error": str(e), "hint": f"可用模板：{_viz.template_brief()}"}
+    meta = payload["meta"] or {}
+    return {
+        "ok": True,
+        "template": template,
+        "title": meta.get("title"),
+        "preview_text": payload["preview_text"],
+        "probe_question": (payload.get("probe") or {}).get("question"),
+        "html_bytes": len(payload["html"].encode("utf-8")),
+        "note": (
+            "交互可视化卡已生成并将自动附在回复卡片里（payload 由系统注入，正文无需复述其内容）。"
+            "正文职责：先抛上面的预测问题让学生猜 → 提示他动手拖 → 请他汇报观察到的现象；不打分。"
+        ),
+    }
+
+
+def _make_visual_schema() -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "make_visual",
+            "description": (
+                "生成交互可视化实验卡（学生可在卡片里拖拽参数、实时看结果）。"
+                "当学生想直观感受某个概念的行为/参数影响、且命中可用模板主题时调用；"
+                "每轮至多一张。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "template": {
+                        "type": "string",
+                        "enum": ["harmonic", "pid_tuner", "curve_lab"],
+                        "description": (
+                            "harmonic=傅里叶谐波逐层逼近方波；pid_tuner=PID 三参数调阶跃响应；"
+                            "curve_lab=通用曲线实验台（表达式驱动，覆盖阻尼振动/拍频/指数增长衰减/"
+                            "三角函数/导数几何等一切「y=f(x) 带参数」类概念）"
+                        ),
+                    },
+                    "title": {"type": "string", "description": "卡片标题（可选，默认用模板名）"},
+                    "preview_text": {"type": "string", "description": "一句话说明能拖什么、看什么（可选）"},
+                    "probe_question": {"type": "string", "description": "预测问题：让学生先猜结果再拖动（推荐给出）"},
+                    "reveal_hint": {"type": "string", "description": "预测的思考提示（可选）"},
+                    "params": {
+                        "type": "object",
+                        "description": (
+                            "模板初始参数。harmonic: default_n(1~25)；pid_tuner: kp(0~10)/ki(0~5)/kd(0~5)；"
+                            "curve_lab: {expr: 关于x的数学表达式(如 A*exp(-d*x)*sin(w*x)，只用 sin cos tan exp log sqrt abs 等), "
+                            "sliders: [{key,min,max,step,default}]（最多5个，key 就是表达式里的变量名）, "
+                            "x_range: [xmin,xmax], x_label/y_label 可选}"
+                        ),
+                    },
+                },
+                "required": ["template"],
+            },
+        },
+    }
+
+
 def _build_registry() -> tuple[ToolSpec, ...]:
     specs: list[ToolSpec] = []
 
@@ -538,6 +622,7 @@ def _build_registry() -> tuple[ToolSpec, ...]:
             func=kg_lookup,
             scenes=("math", "engineering", "concept"),
             digest_fields=("matched",),
+            guide="guide_concept.md",  # 概念讲解指南（含表里反差揭示式讲解），随装配渐进式披露
         )
     )
 
@@ -616,6 +701,24 @@ def _build_registry() -> tuple[ToolSpec, ...]:
                 digest_fields=("stdout", "timed_out", "returncode"),
             )
         )
+
+    # 交互可视化：模板填参生成可拖拽实验卡（docs/16，P0 仅两个模板）
+    specs.append(
+        ToolSpec(
+            name="make_visual",
+            description=(
+                "生成交互可视化实验卡（学生可在卡片里拖拽参数、实时看结果）。"
+                "学生想要「动手调参数/拖滑块/直观感受」时**优先选本工具**，而不是用 "
+                "code_runner 画静态图——可拖拽的探究体验是静态图给不了的。"
+                f"可用模板：{_viz_brief()}。命中主题即调用；每轮至多一张。"
+            ),
+            enabled=True,
+            schema=_make_visual_schema(),
+            func=make_visual,
+            scenes=("concept", "engineering"),
+            digest_fields=("title", "template"),
+        )
+    )
 
     return tuple(specs)
 

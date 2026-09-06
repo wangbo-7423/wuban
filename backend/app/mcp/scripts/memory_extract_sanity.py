@@ -1,6 +1,8 @@
 """记忆服务冒烟：不走 HTTP/DB，直接测 extract_and_write + digest + search。
 
 用法：cd backend && .venv/Scripts/python.exe -m app.mcp.scripts.memory_extract_sanity
+覆盖信号：常规抽取（概念/偏好）+ 去重 + 新增的 兴趣实体 / 自发关联关系 /
+表里反差探针 observation（抽取是概率性的，MISS 人工判断，不算硬失败）。
 """
 from __future__ import annotations
 
@@ -47,6 +49,18 @@ async def main() -> int:
         print("[FAIL] 抽取没有产出")
         return 1
 
+    # 1.5) 新信号：揭示式讲解后学生接住梗 + 主动类比（兴趣 / 自发关联 / 探针）
+    stats_probe = memory_service.extract_and_write(
+        USER, "general",
+        "哈哈哈所以我电脑从来没错，它只是认真地给我找一个最接近的数？"
+        "诶这不就是食堂打饭吗——师傅勺子一抖，给你打一勺『最接近二两』的量，"
+        "屏幕上还写着二两。我觉得这个太有意思了",
+        "0.1 就是 0.1，小学都这么教的。但机器里没有 0.1 这个数——它只是从二进制里挑了个"
+        "离 0.1 最近的邻居凑合给你用，屏幕上那个 0.1 是它替你修饰过的样子。"
+        "所以 0.1 + 0.2 = 0.30000000000000004，它算的从来不是你以为的那两个数。",
+    )
+    print("[1.5] probe extract:", stats_probe)
+
     # 2) 重复抽取一轮（去重路径）
     stats2 = memory_service.extract_and_write(
         USER, "signals",
@@ -63,6 +77,17 @@ async def main() -> int:
     if not ents:
         print("[FAIL] 图谱为空")
         return 1
+
+    # 3.5) 新信号读回校验（概率性，MISS 人工判断）
+    all_obs = [o for e in g.get("entities", []) for o in (e.get("observations") or [])]
+    types = {e.get("entityType") for e in g.get("entities", [])}
+    rel_types = {r.get("relationType") for r in g.get("relations", [])}
+    for label, hit in {
+        "兴趣实体": "兴趣" in types,
+        "自发关联关系": "自发关联" in rel_types,
+        "表里反差探针": any("表里反差探针" in o for o in all_obs),
+    }.items():
+        print(f"[{'PASS' if hit else 'MISS'}] {label}")
 
     # 4) 摘要注入
     digest = memory_service.get_digest(USER)

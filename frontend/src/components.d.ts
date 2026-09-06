@@ -29,6 +29,7 @@ declare module 'vue' {
     EngineeringCard: typeof import('./components/chat/cards/EngineeringCard.vue')['default']
     EvidenceChips: typeof import('./components/learn/EvidenceChips.vue')['default']
     FeedbackCard: typeof import('./components/chat/cards/FeedbackCard.vue')['default']
+    InteractiveCard: typeof import('./components/chat/cards/InteractiveCard.vue')['default']
     MathCard: typeof import('./components/chat/cards/MathCard.vue')['default']
     PracticeCard: typeof import('./components/chat/cards/PracticeCard.vue')['default']
     QuestionCard: typeof import('./components/chat/cards/QuestionCard.vue')['default']

@@ -3,7 +3,7 @@
 数据来源（全部是过程性证据，不打分——docs/00 §6 红线）：
 - messages.tool_calls 里的 kg_lookup 命中 → 主题曝光；
 - messages.gave_answer / scaffold_level → 脚手架结构（AI 直接给答案的比例）；
-- 记忆图谱（MCP）里的 概念/误区/偏好 实体 → 学过什么、错过什么；
+- 记忆图谱（MCP）里的 概念/误区/偏好/兴趣 实体 → 学过什么、错过什么、觉得什么有意思；
 - 用户消息里的追问信号 → 认知负荷的粗估。
 
 cognitive_state JSON 结构（docs/04 与本文件为真源）：
@@ -13,6 +13,7 @@ cognitive_state JSON 结构（docs/04 与本文件为真源）：
                             "review": {"interval_days": int, "due": iso} | 无} },
   "misconceptions": ["..."],            # 记忆图谱里的误区实体
   "preferences": ["..."],               # 偏好实体
+  "interests": ["..."],                 # 兴趣实体（他觉得有意思的概念，抽取约定见 memory_service）
   "scaffolding": {"gave_answer_ratio": float, "recent_scaffold_level": str | null},
   "cognitive_load": "low | medium | high",
   "review_queue": [{"topic": str, "course": str, "reason": str,
@@ -164,12 +165,13 @@ def compute_cognitive_state(db: Session, user_id: str) -> dict[str, Any] | None:
         if m.created_at and (last_submit is None or m.created_at > last_submit):
             last_submit = m.created_at
 
-    misconceptions, preferences = _graph_traits(user_id)
+    misconceptions, preferences, interests = _graph_traits(user_id)
 
     return {
         "topics": topics,
         "misconceptions": misconceptions,
         "preferences": preferences,
+        "interests": interests,
         "scaffolding": {
             "gave_answer_ratio": gave_ratio,
             "recent_scaffold_level": recent_scaffold,
@@ -359,18 +361,19 @@ def _graph_topics(user_id: str) -> dict[str, dict[str, Any]]:
     return out
 
 
-def _graph_traits(user_id: str) -> tuple[list[str], list[str]]:
-    """记忆图谱里的「误区」「偏好」实体名。"""
+def _graph_traits(user_id: str) -> tuple[list[str], list[str], list[str]]:
+    """记忆图谱里的「误区」「偏好」「兴趣」实体名。"""
     try:
         from app.mcp import bridge as _b
         if not _b.available():
-            return [], []
+            return [], [], []
         g = _b.read_graph(user_id)
     except Exception:  # noqa: BLE001
-        return [], []
+        return [], [], []
     mis = [e["name"] for e in g.get("entities", []) if e.get("entityType") == "误区"][:10]
     pref = [e["name"] for e in g.get("entities", []) if e.get("entityType") == "偏好"][:6]
-    return mis, pref
+    interests = [e["name"] for e in g.get("entities", []) if e.get("entityType") == "兴趣"][:6]
+    return mis, pref, interests
 
 
 def _upsert(db: Session, user_id: str, state: dict[str, Any]) -> None:

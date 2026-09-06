@@ -21,7 +21,13 @@ from pydantic import BaseModel, Field
 
 from app.agent import glm_client
 from app.agent.orchestrator import AgentResult
-from app.schemas.card import CardEvidence, CardMessage, CardPayload
+from app.schemas.card import (
+    CardEvidence,
+    CardMessage,
+    CardPayload,
+    InteractiveBlock,
+    InteractiveProbe,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +125,13 @@ def _summarize_tools(result: AgentResult) -> str:
                 lines.append(
                     f"- project_guide (ok={ok}, 未命中): 可提议={sugg}"
                 )
+        elif name == "make_visual":
+            lines.append(
+                f"- make_visual (ok={ok}, template={r.get('template')}, "
+                f"title={r.get('title')}): 交互可视化卡已生成并将自动附在回复卡片里"
+                "（无需在正文复述其内容）。正文职责：先抛预测问题让学生猜 → "
+                f"提示他动手拖 → 请他汇报观察。预测问题：{r.get('probe_question')}"
+            )
         else:
             brief = str(
                 r.get("value") or r.get("matched") or r.get("latex")
@@ -167,14 +180,53 @@ def format_cards(
             web_ev = _web_evidence(result)
             if web_ev:
                 cards[0] = _merge_evidence(cards[0], web_ev)
-            return cards
+            return cards + _viz_cards(result)
     except Exception as e:  # noqa: BLE001
         logger.warning("format_cards 失败，回退单卡: %s", e)
     # 切卡失败走兜底单卡，搜索来源同样落卡（evidence 不依赖切卡模型的自觉）
     web_ev = _web_evidence(result)
     if web_ev:
-        return [_merge_evidence(_fallback_card(result), web_ev)]
-    return [_fallback_card(result)]
+        return [_merge_evidence(_fallback_card(result), web_ev)] + _viz_cards(result)
+    return [_fallback_card(result)] + _viz_cards(result)
+
+
+def _viz_cards(result: AgentResult) -> list[CardMessage]:
+    """make_visual 的确定性落卡（docs/16 §3）：HTML 不走切卡模型——用工具留痕的
+    相同参数从模板重建（确定性等价，GLM 上下文里始终只有小结）。频控：每轮至多 1 张。"""
+    out: list[CardMessage] = []
+    for tc in result.tool_calls or []:
+        if tc.get("tool_name") != "make_visual" or not tc.get("ok"):
+            continue
+        args = tc.get("args") or {}
+        try:
+            from app.viz import builder as _viz
+            payload = _viz.build(
+                args.get("template") or "",
+                params=args.get("params"),
+                title=args.get("title"),
+                preview_text=args.get("preview_text"),
+                probe_question=args.get("probe_question"),
+                reveal_hint=args.get("reveal_hint"),
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("make_visual 卡片重建失败（跳过）", exc_info=True)
+            continue
+        probe = payload.get("probe")
+        block = InteractiveBlock(
+            html=payload["html"],
+            preview_text=payload.get("preview_text"),
+            probe=InteractiveProbe(**probe) if probe else None,
+            meta=payload.get("meta"),
+        )
+        out.append(CardMessage(
+            id=str(uuid.uuid4()),
+            card_type="interactive",
+            text="动手试一试（拖动看看会发生什么）：",
+            payload=CardPayload(interactive=block),
+            strategy=["可视化"],
+        ))
+        break  # 频控：每轮至多 1 张（docs/16 §2.3）
+    return out
 
 
 def _web_evidence(result: AgentResult) -> list[dict[str, Any]]:
@@ -240,13 +292,36 @@ _VALID_SCAFFOLD = {"example", "faded", "hint", "independent"}
 _VALID_NEXT_ACTION = {"accept", "adjust", "reject", "retry", "ask", "none"}
 
 
+def _coerce_payload_lists(payload: dict[str, Any]) -> None:
+    """模型偶发把列表字段写成单个字符串（实测：engineering.pitfalls 变成一句
+    建议）——就地修成单元素列表，保卡不保形；已是列表/None 的不动。"""
+    for key in ("pitfalls", "options", "risk"):
+        v = payload.get(key)
+        if isinstance(v, str) and v.strip():
+            payload[key] = [v.strip()[:200]]
+        elif v is not None and not isinstance(v, list):
+            payload[key] = None
+    for step in payload.get("engineering_steps") or []:
+        if not isinstance(step, dict):
+            continue
+        p = step.get("pitfalls")
+        if isinstance(p, str) and p.strip():
+            step["pitfalls"] = [p.strip()[:200]]
+        elif p is not None and not isinstance(p, list):
+            step["pitfalls"] = None
+
+
 def _parse_card(c: dict[str, Any]) -> CardMessage | None:
     try:
         card_type = c.get("card_type") or "text"
         if card_type not in _VALID_TYPES:
             card_type = "text"
         payload = c.get("payload")
-        payload_obj = CardPayload(**payload) if isinstance(payload, dict) else None
+        if isinstance(payload, dict):
+            _coerce_payload_lists(payload)
+            payload_obj = CardPayload(**payload)
+        else:
+            payload_obj = None
         # 模型偶尔会输出协议外的枚举值（如 scaffold_level="open"）；
         # 直接校验会丢弃整卡（含正文/表格），这里清洗为 None 保卡不保字段。
         scaffold = c.get("scaffold_level")

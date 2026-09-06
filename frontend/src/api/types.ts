@@ -107,6 +107,7 @@ export type CardType =
   | 'motivation'
   | 'scaffold_progress'
   | 'tool_call'
+  | 'interactive'
 
 export type ScaffoldLevel = 'example' | 'faded' | 'hint' | 'independent'
 export type NextAction =
@@ -150,6 +151,20 @@ export interface EngineeringArtifact {
   name?: string | null
 }
 
+/** 预测→验证引导（docs/16：先猜结果，再拖动验证——探究范式，不是出题） */
+export interface InteractiveProbe {
+  question: string
+  reveal_hint?: string | null
+}
+
+/** 交互可视化卡载荷：自包含 HTML，前端沙箱 iframe 渲染（docs/16 §3/§4） */
+export interface InteractiveBlock {
+  html: string
+  preview_text?: string | null
+  probe?: InteractiveProbe | null
+  meta?: Record<string, unknown>
+}
+
 export interface CardPayload {
   options?: Record<string, unknown>[]
   stem?: string | null
@@ -158,6 +173,7 @@ export interface CardPayload {
   math?: MathBlock | null
   engineering_steps?: EngineeringStep[]
   engineering_artifacts?: EngineeringArtifact[]
+  interactive?: InteractiveBlock | null
   mastery?: Record<string, number>
   risk?: Record<string, unknown>[]
   meta?: Record<string, unknown>

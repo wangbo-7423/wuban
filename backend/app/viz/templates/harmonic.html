@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>傅里叶谐波实验台</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    background: #fbfcfe; color: #1f2937;
+    padding: 14px 16px 12px; user-select: none;
+  }
+  .row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .row label { font-size: 13px; color: #4b5563; white-space: nowrap; }
+  .row b { font-size: 15px; color: #2563eb; min-width: 30px; text-align: center; }
+  input[type="range"] { flex: 1; accent-color: #2563eb; }
+  canvas { width: 100%; height: 220px; display: block; background: #fff;
+           border: 1px solid #e5e7eb; border-radius: 8px; }
+  .legend { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: #6b7280; flex-wrap: wrap; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  .readout { margin-left: auto; font-size: 12px; color: #6b7280; }
+  .readout b { color: #b45309; font-size: 12px; }
+</style>
+</head>
+<body>
+  <div class="row">
+    <label>谐波数 N</label>
+    <input id="n" type="range" min="1" max="25" step="1">
+    <b id="nVal">5</b>
+    <span class="readout">波顶残余抖动 ≈ <b id="ripple">18%</b></span>
+  </div>
+  <canvas id="cv"></canvas>
+  <div class="legend">
+    <span><span class="dot" style="background:#2563eb"></span>前 N 个谐波叠加</span>
+    <span><span class="dot" style="background:#9ca3af"></span>目标方波</span>
+    <span>N 越大越像方波；但跳变处那一下 9% 的过冲<b>永远不消失</b>——吉布斯现象</span>
+  </div>
+<script>
+window.__VIZ_PARAMS__ = __VIZ_PARAMS__;
+</script>
+<script>
+(function () {
+  var P = window.__VIZ_PARAMS__ || {};
+  var N = Math.min(25, Math.max(1, parseInt(P.default_n, 10) || 5));
+  var cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+  var nIn = document.getElementById("n"), nVal = document.getElementById("nVal");
+  var rippleEl = document.getElementById("ripple");
+
+  function resize() {
+    cv.width = cv.clientWidth * (window.devicePixelRatio || 1);
+    cv.height = cv.clientHeight * (window.devicePixelRatio || 1);
+    draw();
+  }
+
+  // 前 N 个奇次谐波叠加：f(t) = (4/π) · Σ sin(kt)/k，k = 1,3,5…
+  function partial(t, n) {
+    var s = 0;
+    for (var k = 1; k <= 2 * n; k += 2) s += Math.sin(k * t) / k;
+    return (4 / Math.PI) * s;
+  }
+  function square(t) { return Math.sin(t) >= 0 ? 1 : -1; }
+
+  // 波顶残余抖动（吉布斯过冲的理论值约 8.95%，用当前 N 的数值逼近）
+  function ripple(n) {
+    var peak = 0;
+    for (var t = 0; t < Math.PI; t += 0.001) peak = Math.max(peak, partial(t, n));
+    return Math.max(0, (peak - 1) * 100);
+  }
+
+  function draw() {
+    var w = cv.width, h = cv.height, dpr = window.devicePixelRatio || 1;
+    ctx.clearRect(0, 0, w, h);
+    var mid = h / 2, amp = h * 0.32, x0 = 20 * dpr, x1 = w - 12 * dpr;
+    var tMax = 4 * Math.PI;
+
+    // 横轴与虚线基线
+    ctx.strokeStyle = "#e5e7eb"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x0, mid); ctx.lineTo(x1, mid); ctx.stroke();
+    ctx.setLineDash([4 * dpr, 4 * dpr]);
+
+    // 目标方波（灰虚线）
+    ctx.strokeStyle = "#9ca3af"; ctx.lineWidth = 1.2 * dpr;
+    ctx.beginPath();
+    for (var px = x0; px <= x1; px += 1) {
+      var t = (px - x0) / (x1 - x0) * tMax;
+      var y = mid - square(t) * amp;
+      if (px === x0) ctx.moveTo(px, y); else ctx.lineTo(px, y);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 前 N 个谐波叠加（蓝实线）
+    ctx.strokeStyle = "#2563eb"; ctx.lineWidth = 2 * dpr;
+    ctx.beginPath();
+    for (var px2 = x0; px2 <= x1; px2 += 1) {
+      var t2 = (px2 - x0) / (x1 - x0) * tMax;
+      var y2 = mid - partial(t2, N) * amp;
+      if (px2 === x0) ctx.moveTo(px2, y2); else ctx.lineTo(px2, y2);
+    }
+    ctx.stroke();
+  }
+
+  function sync() {
+    N = parseInt(nIn.value, 10);
+    nVal.textContent = N;
+    rippleEl.textContent = Math.min(99, Math.round(ripple(N))) + "%";
+    draw();
+  }
+
+  nIn.value = N; sync();
+  nIn.addEventListener("input", sync);
+  window.addEventListener("resize", resize);
+  resize();
+})();
+</script>
+</body>
+</html>

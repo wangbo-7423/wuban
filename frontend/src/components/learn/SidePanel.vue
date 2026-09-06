@@ -68,6 +68,10 @@ const memoryGoals = computed(() =>
 const memoryMisconceptions = computed(() =>
   (memory.value?.entities || []).filter((e) => e.entityType === '误区').slice(0, 4),
 )
+// 兴趣：他自己觉得有意思的概念（抽取约定见 memory_service），讲解会往这些方向类比
+const memoryInterests = computed(() =>
+  (memory.value?.entities || []).filter((e) => e.entityType === '兴趣').slice(0, 4),
+)
 // 概念按交流次数（observations 条数，别名条目不计）排，取前 12 个做词云
 const memoryConcepts = computed(() =>
   (memory.value?.entities || [])
@@ -241,7 +245,7 @@ async function startReview(kc: string, course?: string) {
       </h4>
 
       <template v-if="memory?.available && memory.entities.length">
-        <div v-if="memoryPrefs.length || memoryGoals.length" class="mem-tags">
+        <div v-if="memoryPrefs.length || memoryGoals.length || memoryInterests.length" class="mem-tags">
           <el-tag
             v-for="p in memoryPrefs"
             :key="p.name"
@@ -259,6 +263,16 @@ async function startReview(kc: string, course?: string) {
             effect="plain"
           >
             {{ g.name }}
+          </el-tag>
+          <el-tag
+            v-for="it in memoryInterests"
+            :key="it.name"
+            size="small"
+            type="primary"
+            effect="plain"
+            title="他自己觉得有意思的概念"
+          >
+            ✦ {{ it.name }}
           </el-tag>
         </div>
 

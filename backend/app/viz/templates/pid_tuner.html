@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PID 调参实验台</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    background: #fbfcfe; color: #1f2937;
+    padding: 14px 16px 12px; user-select: none;
+  }
+  .row { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .row label { font-size: 13px; color: #4b5563; white-space: nowrap; width: 78px; }
+  .row b { font-size: 14px; color: #2563eb; min-width: 44px; text-align: center; }
+  input[type="range"] { flex: 1; accent-color: #2563eb; }
+  canvas { width: 100%; height: 210px; display: block; background: #fff;
+           border: 1px solid #e5e7eb; border-radius: 8px; }
+  .readouts { display: flex; gap: 18px; margin-top: 8px; font-size: 12px; color: #6b7280; flex-wrap: wrap; }
+  .readouts b { color: #b45309; }
+  .hint { margin-top: 6px; font-size: 12px; color: #9ca3af; }
+</style>
+</head>
+<body>
+  <div class="row"><label>Kp 比例</label><input id="kp" type="range" min="0" max="10" step="0.1"><b id="kpV">2.0</b></div>
+  <div class="row"><label>Ki 积分</label><input id="ki" type="range" min="0" max="5" step="0.05"><b id="kiV">0.50</b></div>
+  <div class="row"><label>Kd 微分</label><input id="kd" type="range" min="0" max="5" step="0.05"><b id="kdV">0.00</b></div>
+  <canvas id="cv"></canvas>
+  <div class="readouts">
+    <span>超调 <b id="os">—</b></span>
+    <span>稳定时间(±2%) <b id="ts">—</b></span>
+    <span>稳态误差 <b id="err">—</b></span>
+  </div>
+  <div class="hint">一阶被控对象 G(s)=1/(s+1)，阶跃设定值=1。纯 P 有稳态误差；Ki 消除误差但太大会振荡；Kd 抑制超调。</div>
+<script>
+window.__VIZ_PARAMS__ = __VIZ_PARAMS__;
+</script>
+<script>
+(function () {
+  var P = window.__VIZ_PARAMS__ || {};
+  var S = {
+    kp: clamp(parseFloat(P.kp), 0, 10, 2),
+    ki: clamp(parseFloat(P.ki), 0, 5, 0.5),
+    kd: clamp(parseFloat(P.kd), 0, 5, 0)
+  };
+  function clamp(v, lo, hi, dflt) {
+    if (v === null || isNaN(v)) return dflt;
+    return Math.min(hi, Math.max(lo, v));
+  }
+
+  var T = 1.0;          // 被控对象时间常数
+  var DT = 0.005, T_END = 12;
+  var cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+
+  function bind(id, key, fmt) {
+    var el = document.getElementById(id), lab = document.getElementById(id + "V");
+    el.value = S[key]; lab.textContent = fmt(S[key]);
+    el.addEventListener("input", function () {
+      S[key] = parseFloat(el.value); lab.textContent = fmt(S[key]); run();
+    });
+  }
+
+  // 闭环仿真：e=r−y，u=Kp·e+Ki·∫e−Kd·de/dt，对象 y'=(u−y)/T
+  function simulate() {
+    var y = 0, I = 0, prevE = 1, r = 1, ys = [];
+    for (var t = 0; t <= T_END; t += DT) {
+      var e = r - y;
+      I += e * DT;
+      var D = (e - prevE) / DT; prevE = e;
+      var u = S.kp * e + S.ki * I - S.kd * D;
+      y += DT * (u - y) / T;
+      ys.push({ t: t, y: y });
+    }
+    return ys;
+  }
+
+  function metrics(ys) {
+    var peak = 0, err = 1 - ys[ys.length - 1].y, ts = null;
+    for (var i = 0; i < ys.length; i++) peak = Math.max(peak, ys[i].y);
+    for (var j = ys.length - 1; j >= 0; j--) {
+      if (Math.abs(ys[j].y - 1) > 0.02) { ts = ys[j].t; break; }
+    }
+    return {
+      os: peak > 1 ? ((peak - 1) * 100).toFixed(0) + "%" : "无超调",
+      ts: ts === null ? "—" : (ts >= T_END - DT ? ">12s" : ts.toFixed(1) + "s"),
+      err: Math.abs(err) < 0.005 ? "≈0" : err.toFixed(3)
+    };
+  }
+
+  function draw(ys) {
+    var dpr = window.devicePixelRatio || 1;
+    var w = cv.width = cv.clientWidth * dpr, h = cv.height = cv.clientHeight * dpr;
+    ctx.clearRect(0, 0, w, h);
+    var pad = 16 * dpr, x0 = pad, x1 = w - 8 * dpr, yTop = 10 * dpr, yBot = h - 14 * dpr;
+    var yMax = 1.8;
+    function X(t) { return x0 + t / T_END * (x1 - x0); }
+    function Y(v) { return yBot - v / yMax * (yBot - yTop); }
+
+    // 网格与设定值线
+    ctx.strokeStyle = "#f3f4f6"; ctx.lineWidth = 1;
+    for (var g = 0; g <= 1.5; g += 0.5) { ctx.beginPath(); ctx.moveTo(x0, Y(g)); ctx.lineTo(x1, Y(g)); ctx.stroke(); }
+    ctx.strokeStyle = "#9ca3af"; ctx.setLineDash([4 * dpr, 4 * dpr]);
+    ctx.beginPath(); ctx.moveTo(x0, Y(1)); ctx.lineTo(x1, Y(1)); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 响应曲线
+    ctx.strokeStyle = "#2563eb"; ctx.lineWidth = 2 * dpr;
+    ctx.beginPath();
+    for (var i = 0; i < ys.length; i++) {
+      var px = X(ys[i].t), py = Y(Math.min(ys[i].y, yMax));
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+
+    // 轴标签
+    ctx.fillStyle = "#9ca3af"; ctx.font = (10 * dpr) + "px sans-serif";
+    ctx.fillText("设定值=1", x0 + 2, Y(1) - 4 * dpr);
+    ctx.fillText("0s", x0, h - 3 * dpr); ctx.fillText("12s", x1 - 16 * dpr, h - 3 * dpr);
+  }
+
+  function run() {
+    var ys = simulate();
+    var m = metrics(ys);
+    document.getElementById("os").textContent = m.os;
+    document.getElementById("ts").textContent = m.ts;
+    document.getElementById("err").textContent = m.err;
+    draw(ys);
+  }
+
+  bind("kp", "kp", function (v) { return v.toFixed(1); });
+  bind("ki", "ki", function (v) { return v.toFixed(2); });
+  bind("kd", "kd", function (v) { return v.toFixed(2); });
+  window.addEventListener("resize", run);
+  run();
+})();
+</script>
+</body>
+</html>

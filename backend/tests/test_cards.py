@@ -87,6 +87,30 @@ class TestParseCard:
         # options 必须是 list[dict]，协议外类型宁可丢卡也不脏渲染
         assert _parse_card({"card_type": "choice", "text": "x", "payload": {"options": "A"}}) is None
 
+    def test_pitfalls_str_coerced_to_list(self):
+        # 实测翻车点：模型把 pitfalls 写成单个字符串——修成单元素列表保卡
+        card = _parse_card({
+            "card_type": "engineering", "text": "x",
+            "payload": {"engineering_steps": [
+                {"title": "s1", "pitfalls": "不要同时调多个参数"},
+                {"title": "s2", "pitfalls": ["已是列表"]},
+                {"title": "s3", "pitfalls": None},
+            ]},
+        })
+        assert card is not None
+        steps = card.payload.engineering_steps
+        assert steps[0].pitfalls == ["不要同时调多个参数"]
+        assert steps[1].pitfalls == ["已是列表"]
+        assert steps[2].pitfalls is None
+
+    def test_pitfalls_junk_type_cleaned_to_none(self):
+        card = _parse_card({
+            "card_type": "engineering", "text": "x",
+            "payload": {"engineering_steps": [{"title": "s", "pitfalls": 42}]},
+        })
+        assert card is not None
+        assert card.payload.engineering_steps[0].pitfalls is None
+
     def test_evidence_without_source_dropped(self):
         card = _parse_card(
             {

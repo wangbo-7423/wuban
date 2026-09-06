@@ -17,6 +17,7 @@ import QuestionCard from './cards/QuestionCard.vue'
 import FeedbackCard from './cards/FeedbackCard.vue'
 import WarningCard from './cards/WarningCard.vue'
 import UnderstandCard from './cards/UnderstandCard.vue'
+import InteractiveCard from './cards/InteractiveCard.vue'
 
 const props = defineProps<{ msg: CardMessage }>()
 
@@ -43,6 +44,7 @@ const map: Record<string, Component> = {
   motivation: TextCard,
   scaffold_progress: TextCard,
   tool_call: TextCard,
+  interactive: InteractiveCard, // 交互可视化实验卡（沙箱 iframe，docs/16）
 }
 
 const comp = computed(() => map[props.msg.card_type] || TextCard)

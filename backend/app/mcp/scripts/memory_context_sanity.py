@@ -4,7 +4,7 @@
 
 不调 GLM 抽取——用 apply_extraction 直接种图（apply_extraction 本身是纯合并逻辑），
 只验证「读路径」的分层裁剪是否符合上下文工程预期：
-    L0 只含 偏好/目标/误区，不含概念；
+    L0 只含 偏好/目标/误区/兴趣，不含概念；
     L1 只回当前消息命中的概念 + 一步邻接关系，无关话题返回 None。
 """
 from __future__ import annotations
@@ -39,11 +39,13 @@ _SEED = {
         {"name": "混淆卷积与相关", "entityType": "误区", "observations": ["与互相关混淆过，已纠正"]},
         {"name": "偏好图示讲解", "entityType": "偏好", "observations": ["先看图再看重公式"]},
         {"name": "备考信号系统期末", "entityType": "目标", "observations": []},
+        {"name": "觉得频谱像音乐均衡器", "entityType": "兴趣", "observations": ["学生主动连到音乐均衡器"]},
     ],
     "relations": [
         {"from": "傅里叶变换", "to": "卷积定理", "relationType": "相关"},
         {"from": "傅里叶级数", "to": "傅里叶变换", "relationType": "前置依赖"},
         {"from": "傅里叶变换", "to": "备考信号系统期末", "relationType": "属于目标"},
+        {"from": "傅里叶变换", "to": "觉得频谱像音乐均衡器", "relationType": "自发关联"},
     ],
 }
 
@@ -56,15 +58,18 @@ async def main() -> int:
 
     stats = memory_service.apply_extraction(USER, _SEED)
     print("[0] seed stats:", stats)
-    if stats["entities_created"] != 6 or stats["relations_created"] != 3:
+    if stats["entities_created"] != 7 or stats["relations_created"] != 4:
         print("[FAIL] 种图结果不符预期")
         return 1
 
-    # 1) L0 常驻层：偏好/目标/误区，绝不含概念
+    # 1) L0 常驻层：偏好/目标/误区/兴趣，绝不含概念
     l0 = memory_service.get_persistent_digest(USER)
     print("[1] L0:\n" + (l0 or "(None)"))
     if not l0 or "偏好" not in l0 or "误区" not in l0 or "已纠正" not in l0:
         print("[FAIL] L0 缺偏好/目标/误区或未标注已纠正")
+        return 1
+    if "觉得有意思的" not in l0:
+        print("[FAIL] L0 缺兴趣（觉得有意思的）")
         return 1
     if "傅里叶变换" in l0:
         print("[FAIL] L0 混入了概念层内容")

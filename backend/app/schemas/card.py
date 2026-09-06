@@ -35,6 +35,7 @@ CardType = Literal[
     "metacog",                # 元认知提示（鼓励自查）
     "motivation",             # 学习动机反馈
     "scaffold_progress",      # 脚手架推进（example → faded → hint → independent）
+    "interactive",            # 交互可视化实验（AI 生成可拖拽 HTML，沙箱 iframe 渲染，docs/16）
     "tool_call",              # Agent 工具调用中间态（前端可显示加载）
 ]
 
@@ -85,6 +86,22 @@ class EngineeringStep(BaseModel):
     next_step_hint: str | None = None
 
 
+class InteractiveProbe(BaseModel):
+    """预测→验证引导（docs/16：先猜结果，再拖动验证——探究范式，不是出题）。"""
+
+    question: str
+    reveal_hint: str | None = None
+
+
+class InteractiveBlock(BaseModel):
+    """交互可视化卡载荷：自包含 HTML，前端沙箱 iframe 渲染（docs/16 §3/§4）。"""
+
+    html: str = Field(description="自包含 HTML（CSS/JS 全内联，零外部请求），≤64KB")
+    preview_text: str | None = None
+    probe: InteractiveProbe | None = None
+    meta: dict | None = None
+
+
 class CardPayload(BaseModel):
     """卡片动态载荷（不同 card_type 字段不同，全为可空）。"""
 
@@ -99,6 +116,8 @@ class CardPayload(BaseModel):
     # engineering
     engineering_steps: list[EngineeringStep] | None = None
     engineering_artifacts: list[dict] | None = None  # 截图/链接
+    # interactive（docs/16）
+    interactive: InteractiveBlock | None = None
     # 通用
     mastery: dict[str, float] | None = None  # 各知识点掌握度
     risk: list[dict] | None = None
@@ -154,6 +173,8 @@ __all__ = [
     "MathStep",
     "MathBlock",
     "EngineeringStep",
+    "InteractiveProbe",
+    "InteractiveBlock",
     "CardPayload",
     "ToolCallRecord",
     "CardMessage",
