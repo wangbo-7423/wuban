@@ -54,7 +54,9 @@ text / question / understand / math / engineering / practice / choice / recommen
 - 推荐下一步学习资源/路径 → 用 `recommendation` 卡，payload.options=[{value, label}]，reason 写理由。
 - 反问学生（先问再答）→ 用 `question` 卡。
 - 普通解释/过渡 → `understand` 或 `text`。
-- 其余（反馈/元认知/警告等）按语义选。
+- 回答中提示了学生未掌握的前置概念（如工具结果里有前置节点、或你提醒「先学 X 再看这个」）→ 补一张 `warning` 卡，语义是「前置缺失」；回答中一次引入了大量新概念/多步推导并提醒学生分步消化 → `warning` 卡，语义是「负荷过高」。「学习状态」里的系统规则判定是发卡的强依据（触发 = 建议发，是否发、如何措辞仍由你定）；卡壳概念与当前问题对不上话题时不要发。warning 卡只在确实有风险时发，不要每轮都发。
+- 「学习状态」只用于判定风险与发卡参考，不要把它复述成正文（那是状态记录，不是新内容）。
+- 其余（反馈/元认知等）按语义选。
 
 # 输出格式（严格 JSON，不要多余文字）
 {
@@ -147,16 +149,49 @@ def _extract_json(text: str) -> dict[str, Any]:
     return glm_client.extract_json_object(text)
 
 
+# 切卡侧学习上下文的防御性截断（render_learning_context 产物本身只有几行）
+_LEARNING_CTX_MAX_CHARS = 1200
+
+
+def kg_hit_concepts(result: AgentResult) -> list[str]:
+    """本轮 kg_lookup 命中的规范化节点名（去重保序；未命中/失败不计）。
+
+    学习状态的键控原料（docs/17）：streak 按「概念出现过的轮数」计数，
+    概念名必须来自 KG 规范节点——模糊文本匹配会重新引入话题漂移问题。
+    """
+    out: list[str] = []
+    for tc in result.tool_calls or []:
+        if tc.get("tool_name") != "kg_lookup" or not tc.get("ok"):
+            continue
+        matched = (tc.get("result") or {}).get("matched") or {}
+        name = str(matched.get("name") or "").strip()
+        if name:
+            out.append(name)
+    return list(dict.fromkeys(out))
+
+
 def format_cards(
-    result: AgentResult, *, user_text: str, course_id: str
+    result: AgentResult,
+    *,
+    user_text: str,
+    course_id: str,
+    learning_context: str | None = None,
 ) -> list[CardMessage]:
-    """把 AgentResult 格式化成 1~3 张 CardMessage。失败回退单卡。"""
+    """把 AgentResult 格式化成 1~3 张 CardMessage。失败回退单卡。
+
+    learning_context：结构化学习状态的渲染产物（session_memory.
+    render_learning_context，含卡壳 streak 与确定性规则判定）。切卡模型本身
+    单轮失忆——跨轮的「前置缺失/负荷过高」信号（学生连续多轮卡在同一概念等）
+    只能从这里进来，否则 warning 判定退化为本轮快照。
+    """
     prompt = (
         f"课程：{course_id}\n"
         f"学生问题：{user_text}\n\n"
         f"助手回答原文：\n{result.text}\n\n"
         f"工具调用摘要：\n{_summarize_tools(result)}"
     )
+    if learning_context:
+        prompt += f"\n\n{learning_context[:_LEARNING_CTX_MAX_CHARS]}"
     try:
         data = glm_client.chat_structured(
             messages=[

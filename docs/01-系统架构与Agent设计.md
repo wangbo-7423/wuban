@@ -16,20 +16,23 @@
 │ 后端 backend/app  FastAPI（统一响应 + 全局异常 + Pydantic 校验）  │
 │                                                                │
 │  api/     auth（注册/登录/me）  learning（画像/学习域/项目）        │
-│           student（chat / 会话管理 / tools）  health              │
+│           student/（chat+stream / practice / conversations /     │
+│           insights / support 共享支撑）  memory  upload  health   │
 │  agent/   orchestrator（编排） system（提示词）                   │
 │           glm_client（GLM 5.3 Flash） tools（工具注册表）          │
-│  kg/      可插拔知识图谱（os / autocontrol / signals）            │
+│           intent（工具装配） compress（工具结果压缩）              │
+│  services/ 画像/会话记忆/遥测  skills/ 场景技能  viz/ 可视化       │
+│  mcp/ 记忆服务桥接  kg/ 可插拔知识图谱（os / autocontrol / signals）│
 │  repositories/  models/  schemas/  core/                         │
 └───────┬──────────────────────────────┬─────────────────────────┘
         │ SQLAlchemy 2                  │ zai-sdk（OpenAI 兼容形态）
 ┌───────▼──────────┐   ┌───────────────▼─────────────────────────┐
 │ PostgreSQL 16    │   │ GLM 5.3 Flash（thinking 启用 + 工具调用） │
-│ 6 张业务表        │   └─────────────────────────────────────────┘
+│ 8 张业务表        │   └─────────────────────────────────────────┘
 └──────────────────┘
 ```
 
-**设计立场：单 Agent 自主决策，不搞手工流水线。** 早期版本的「意图识别 → KG → 认知诊断 → 策略选择 → 卡片」五层规则路由已废弃（代码归档于 `backend/app/_archive/pipeline_v1/`），由 GLM 在 system prompt 约束下自主决定何时反问、何时调工具、何时直接讲。规则少了，行为由「提示词 + 工具 + 卡片协议」三方约束保证。
+**设计立场：单 Agent 自主决策，不搞手工流水线。** 早期版本的「意图识别 → KG → 认知诊断 → 策略选择 → 卡片」五层规则路由已废弃（代码曾归档于 `app/_archive/pipeline_v1/`，已从仓库移除，git 历史可考），由 GLM 在 system prompt 约束下自主决定何时反问、何时调工具、何时直接讲。规则少了，行为由「提示词 + 工具 + 卡片协议」三方约束保证。
 
 ## 2. 技术栈
 
@@ -45,11 +48,11 @@
 ```
 前端 ChatPanel
   → POST /api/student/chat  {message, images[], course_id, conversation_id?}
-  → api/student.py
+  → api/student/chat.py（公共准备 _prepare_chat 在 api/student/support.py 与流式链路共享）
       1. 取/建会话（conversation_id 为空则新建，标题 = 消息前 16 字）
       2. 用户消息落库（含图片 meta）
-      3. 取该会话最近 8 条消息作为 history
-      4. new AgentOrchestrator(extra_system="当前课程：{course_id}").run(...)
+      3. 取该会话最近 8 条消息作为 history（history_to_messages，support.py）
+      4. AgentOrchestrator(dynamic_context="当前课程…+记忆+会话状态").run(...)
   → orchestrator 主循环
       messages = [system, *history, user(文本+图片)]
       loop（最多 4 轮）:
@@ -70,7 +73,9 @@
   12 条不触发，压缩后保留最近 8 条对齐窗口）。跨请求的状态都在数据库里，服务无状态。
 - **任务状态（Write 策略·Scratchpad）**：每轮后从最新 assistant 卡启发式提取
   「在学什么/进行到哪/等学生做什么」存 `conversations.scratchpad`（零 LLM 成本，
-  卡片协议本身就是结构化的），随 extra_system 注入，Agent 断点续传不重复已讲内容。
+  卡片协议本身就是结构化的），随动态尾部上下文注入，Agent 断点续传不重复已讲内容。
+  跨轮学习状态与 warning 判定（`learning_state` / `pending` / streak，[docs/17](./17-跨轮学习状态与warning判定设计.md)）
+  也落在 scratchpad 里，经切卡的 learning_context 传给结构化切分——已实现。
   实现见 `app/services/session_memory.py`。
 - **前缀缓存（Cache 策略）**：智谱隐式缓存按**前缀**命中（命中部分约半价，
   `usage.prompt_tokens_details.cached_tokens` 上报）。据此定死两条结构规则：
@@ -137,7 +142,7 @@
 | `kg_lookup` | 在课程知识图谱里按关键词匹配节点，返回难度/前置/摘要，用于定位学生卡点与前置缺失 | `course_id: str, query: str` | `{ok, matched:{id,name,difficulty,prerequisites,summary}, course}` | 始终启用 |
 | `memory_search` | 查**这位学生**的长期记忆图谱（学过的概念/暴露的误区/偏好目标）；系统注入的记忆只覆盖当前问题相关部分，此工具是主动补充 | `query: str` | `{ok, query, entities:[{name,entityType,observations}], relations:[str]}` | 已实现，`enable_mcp_memory=true` |
 | `code_runner` | 受控沙箱执行学生 Python 代码（工科微项目线核心）：禁网络、禁系统命令、硬超时，捕获 stdout/stderr/退出码，matplotlib 图自动导出 URL | `code: str, lang='python'` | `{ok, stdout, stderr, returncode, timed_out, figures:[{name,url}]}` | 已实现，`enable_code_runner=true`（默认开） |
-| `web_search` | 联网检索（本地知识不够新时核实）：三级后端可插拔——Tavily（配 `tavily_api_key`）→ Bing 中国区抓取（零依赖，国内网络最稳）→ ddgs 多引擎；结果在聚合层统一裁剪有界，全部不可用时返回结构化错误 + hint，GLM 自动降级用本地知识并声明确定度 | `query, top_k=5` | `{ok, provider, query, results:[{title,url,snippet}]}` / `{ok:false, error, hint}` | 已实现（`app/agent/web_search.py`），`enable_web_search=false`（默认关，开启即用） |
+| `web_search` | 联网检索（本地知识不够新时核实）：三级后端可插拔——Tavily（配 `tavily_api_key`）→ Bing 中国区抓取（零依赖，国内网络最稳）→ ddgs 多引擎；结果在聚合层统一裁剪有界，全部不可用时返回结构化错误 + hint，GLM 自动降级用本地知识并声明确定度 | `query, top_k=5` | `{ok, provider, query, results:[{title,url,snippet}]}` / `{ok:false, error, hint}` | 已实现（`app/agent/web_search.py`），`enable_web_search=true`（默认开，`web_search_backend` 可切后端） |
 | `calculator` | 受限数学表达式求值（AST 白名单）——仅当 sympy 不可用时注册兜底 | `expression: str` | `{ok, expression, value}` / `{ok:false, error}` | 兜底（正常环境不出现） |
 
 **场景 skill（`app/skills/`，回答「怎么教」）**：`calculus`（微积分）/ `ode`（常微分方程）/ `project_guide`（工科微项目提议）。执行成功后自动把该场景的 `SKILL.md` 注入返回值 `teaching_hints`——模型一次调用同时拿到「结果」和「怎么教」。新增 skill 只需建目录 + 在 `registry.py` 的 `_SKILL_MODULES` 加模块名。
@@ -210,7 +215,7 @@ class KnowledgeGraph(Protocol):
 | `JWT_SECRET` | 必填 | ≥32 字节，HS256 |
 | `GLM_API_KEY` / `GLM_BASE_URL` / `GLM_MODEL` | 必填 / 官方 / `glm-5.3-flash` | 模型接入 |
 | `GLM_ENABLE_THINKING` | `true` | 思维链开关 |
-| `ENABLE_CALCULATOR` / `ENABLE_WEB_SEARCH` / `ENABLE_CODE_RUNNER` | true / false / false | 工具开关 |
+| `ENABLE_CALCULATOR` / `ENABLE_WEB_SEARCH` / `ENABLE_CODE_RUNNER` / `ENABLE_MCP_MEMORY` | true / true / true / true | 工具开关 |
 
 安全要点：密码 bcrypt 哈希；登录失败统一「用户名或密码错误」防枚举；JWT payload `{sub, iat, exp, iss}`，过期 24h；无 email、无 role 字段（全员 student）。
 
@@ -222,9 +227,10 @@ class KnowledgeGraph(Protocol):
 | 学习上下文回推（探索档案回传）| **已实现**：聊天落库后同步重算 `cognitive_state` 折算进 `ChatOut.updated_context`；另有 `GET /api/student/context`（进主界面拉取 / 练习提交后刷新），前端顶栏进度、侧栏路径与复习到期均已接真实数据 | `cognitive` 块目前只带认知负荷粗估，掌握度数值化（mastery 写入点）、元认知校准仍是空位 |
 | 间隔复习闭环 | **已实现**：`profile_service._schedule_review`（SM-2-lite：首触 2 天、重提间隔翻倍封顶 60 天）→ `review_queue` → `GET /student/context` 的 `review_due` → 侧栏「该回顾了」一键发起回忆式复习会话（种子消息要求 AI 先提问让学生回忆，不打分） | 复习会话本身尚无独立证据标记（与普通对话同链路）；`ease` 因子细化 |
 | RAG 课程知识库 | 无 | `settings.milvus_uri`；错误码 `RAG_ERROR=2001` |
-| 联网搜索 | **已实现**（`app/agent/web_search.py`，Tavily → Bing → ddgs 三级后端，失败结构化降级）| `settings.enable_web_search`（默认关）/ `tavily_api_key` / `web_search_backend` |
+| 联网搜索 | **已实现**（`app/agent/web_search.py`，Tavily → Bing → ddgs 三级后端，失败结构化降级）| `settings.enable_web_search`（默认开）/ `tavily_api_key` / `web_search_backend` |
 | 代码执行工具 | **已实现**（`app/agent/code_runner.py`，禁网络/禁系统命令/硬超时，`project_guide` 微项目模板可直接跑）| `settings.enable_code_runner`（默认开）/ `code_runner_timeout` |
-| **探索档案**（提过的好问题 / 做过的作品 / 还想深入的点）| `cognitive_state` 恒为 `{}`，全后端无 UPDATE；`GET /api/student/exploration` 已从 messages 聚合 | `learner_profiles.cognitive_state` JSON。**可先从 messages 表聚合**，不必建新表 |
+| **探索档案**（提过的好问题 / 做过的作品 / 还想深入的点）| **已实现**：`GET /api/student/exploration` 从 messages 聚合（好问题/未展开线索/kg 命中主题，`app/api/student/insights.py`）；`cognitive_state` 已随聊天同步回推 | 作品集需学生主动提交，待 `StudentWork` 表 |
+| **跨轮学习状态与 warning 判定**（[docs/17](./17-跨轮学习状态与warning判定设计.md)）| **已实现**：scratchpad 维护 `learning_state`/`pending`/streak（`session_memory`），经 `render_learning_context` 注入切卡，warning 话题护栏见 `app/agent/cards.py` | §3~§5 的独立证据表方案未落地，当前为 docs/17 §6 过渡方案 |
 | 微项目作品集 | 无 | 若需学生提交作品，可新增 `StudentWork` 表 |
 
 ---

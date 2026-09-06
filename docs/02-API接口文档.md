@@ -47,10 +47,16 @@ Pydantic 校验失败时，`data.error` 为 **字段 → 错误列表** 的映�
 | 场景 | HTTP 状态 | `code` | 说明 |
 | --- | --- | --- | --- |
 | 成功 | 200 | 0 | — |
-| **业务错误（BizError）** | **200** | 业务码 | **前端必须判断 `code` 而非 HTTP 状态** |
+| **业务错误（BizError，4xx 段码）** | **码即 HTTP 状态**（400/401/403/404/409/429） | 同 HTTP 码 | 统一体格式；axios error 分支可直接按 `status` 分流 |
+| **业务错误（BizError，1xxx/2xxx 段码）** | **500** | 原业务码（1002/2001/…） | 非 HTTP 语义的业务码由 500 承载，`body.code` 保留业务码可细分 |
 | 参数校验失败 | 422 | 422 | 带 `data.error` 字段级信息 |
 | 路径不存在等 HTTPException | 404 等 | 同 HTTP 码 | 统一体格式 |
 | 未捕获异常 | 500 | 500 | 不泄漏内部细节 |
+
+> 2026-09-06 起：业务错误不再包成 HTTP 200（旧行为导致前端只能靠 `body.code` 识别失败、
+> 登录态过期变「僵尸登录态」）。body 仍为 `{code, message, data}` 统一体，但 HTTP 状态
+> 码即真实语义——axios 拦截器 error 分支拿到 `err.response.status`，401 清 token 跳登录页。
+> 实现见 `backend/app/core/exceptions.py`（`_http_status`）。
 
 业务错误码：
 
@@ -270,7 +276,7 @@ Pydantic 校验失败时，`data.error` 为 **字段 → 错误列表** 的映�
 | `title` | `string \| null` | 是 | 会话标题（刷新列表用） |
 | `updated_context` | `object \| null` | 是 | 学习上下文回推 `{course, path, mastery, review_due, cognitive}`，卡片落库后重算 `cognitive_state` 折算生成（与 §4.1c `GET /student/context` 同形状）；重算失败为 null，前端保留旧 context。**`mastery` 语义是「过程性探索深度估计值」，不是考试分数**（docs/00 §6 红线） |
 
-主卡片由后端 `format_cards()`（GLM JSON mode 二次切卡）产出，失败时回退启发式单卡：含「？」→`question`；含步骤词/多行→`understand`；否则 `text`；`payload.meta.thinking_chars` 记录思维链长度；`next_action="ask"`。结构化 `math`/`engineering` 卡片协议见 03。
+主卡片由后端 `format_cards()`（GLM JSON mode 二次切卡）产出，输入含回答原文、本轮工具摘要与会话状态摘要（`summary/scratchpad`——切卡模型看不到对话历史，跨轮 warning 信号由此带入），失败时回退启发式单卡：含「？」→`question`；含步骤词/多行→`understand`；否则 `text`；`payload.meta.thinking_chars` 记录思维链长度；`next_action="ask"`。结构化 `math`/`engineering` 卡片协议见 03。
 
 ```json
 {
@@ -442,13 +448,13 @@ Pydantic 校验失败时，`data.error` 为 **字段 → 错误列表** 的映�
 | --- | --- |
 | GET `/api/health` | `{ "status": "up" }` |
 | POST `/api/health/demo-ok` | 正常统一响应示例（body: `{name, age}`） |
-| GET `/api/health/demo-biz-error` | 业务异常示例：HTTP 200 + `code 409` |
+| GET `/api/health/demo-biz-error` | 业务异常示例：HTTP 409 + 统一体（`body.code=409`） |
 | GET `/api/health/demo-500` | 兜底 500 统一体 |
 | GET `/api/health/demo-http-404` | HTTPException 404 统一体 |
 
 ## 6. 前端对接约定（当前实现）
 
-- **axios 封装**（`src/api/http.ts`）：`baseURL='/api'`，超时 10s；请求拦截器自动附 `Authorization`；响应拦截器解包统一体、HTTP 401 时清 token 并跳 `/login`。**注意：业务错误（HTTP 200 + code≠0）不会被拦截器抛出，业务代码需自行判断 `code`。**
+- **axios 封装**（`src/api/http.ts`）：`baseURL='/api'`，超时 10s；请求拦截器自动附 `Authorization`；响应拦截器解包统一体，HTTP 401（含 body.code=401 防御分支）时清 token 并跳 `/login`；业务错误为真实 4xx/5xx 状态码，走 error 分支抛统一错误体，调用方在 `catch` 里拿 `message`。
 - **登录态**：token 存 `localStorage('token')`；`nickname/username` 来自 login/register 响应。
 - **路由守卫**：未登录访问任何页 → `/login`；已登录访问 `/login`、`/register` → `/learn`。
 - **mock 开关**：`src/api/config.ts` 的 `USE_MOCK_AUTH` / `USE_MOCK_LEARN`（当前均 `false`，走真实后端）。

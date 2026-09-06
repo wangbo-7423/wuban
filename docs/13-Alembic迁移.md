@@ -56,3 +56,17 @@ cd backend
 - ❌ 不要跳过人工 review 直接 upgrade；
 - ❌ 不要在 alembic.ini 写第二份 URL（配置漂移 = 事故）；
 - ⚠️ autogenerate 对 server_default / 类型宽化的部分场景不敏感，`compare_type=True` 已开但 review 不能省。
+
+## 7. 迁移纪律：只追加，不重置（2026-09-06 补）
+
+早期图省事「改完 models 重刷 baseline」的做法已封死——`14af9d9e8982` baseline
+是**一次性快照**，开发库已 `stamp head` 接管，此后一切 schema 变更只能**追加新 revision**：
+
+1. **改 models → autogenerate 新 revision**（§3 工作流），哪怕只是加一列；
+2. **永不重生成 / 重刷 baseline**：重新 autogenerate 一个"全量 baseline"会让所有
+   已 stamp 的库全部漂移，`fix_drift` 这种补救迁移就是这么来的（历史教训）；
+3. **永不修改已提交的旧迁移**——错了就再写一个修正迁移，迁移文件是不可变历史；
+4. **每次收尾跑 `alembic check`**，要求输出 No new upgrade operations detected
+   （迁移产出 = ORM 模型）；启动时 `run_migrations()` 自动 upgrade，不必手动跑；
+5. 唯一例外（重置逃逸舱）：数据库尚无任何要保留的数据、且团队内一致同意时，
+   才允许 drop 库 + 重走 baseline——操作要写进本文档 §5「已验证」留痕。

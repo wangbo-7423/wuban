@@ -33,7 +33,7 @@ def demo_ok(payload: DemoIn) -> dict:
 
 @router.get("/health/demo-biz-error")
 def demo_biz_error() -> dict:
-    """业务异常：应返回 200 + code 409 + message。"""
+    """业务异常：应返回 HTTP 409 + 统一体（body.code=409）。"""
     raise BizError(ErrorCode.CONFLICT, "课程已存在")
 
 

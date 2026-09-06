@@ -12,10 +12,9 @@ http.interceptors.request.use((cfg) => {
 http.interceptors.response.use(
   (res) => {
     const body = res.data as { code?: number; message?: string } | undefined
-    // 后端把业务异常包成 HTTP 200 + {code,message,data}（见 backend/app/core/exceptions.py），
-    // HTTP 状态码永远是 200——只看 err.response.status 永远等不到 401，
-    // 登录态过期后整个应用会变成「僵尸登录态」：请求全部静默失败、
-    // 页面停在旧数据上。这里按业务码判定登录失效。
+    // 后端业务错误现返回真实 HTTP 状态码（BizError → 4xx/5xx，见 backend/app/core/exceptions.py），
+    // 走下方 error 分支。这里保留 code===401 判定作为防御：万一有残留的 200 错误信封
+    // （历史响应/自定义 JSONResponse），登录态过期仍能正确跳登录页，不会变成僵尸登录态。
     if (body?.code === 401) {
       localStorage.removeItem('token')
       if (!window.location.pathname.startsWith('/login')) {
@@ -32,14 +31,15 @@ http.interceptors.response.use(
     return res.data // 后端统一 {code,message,data}
   },
   (err) => {
-    // 登录态失效：清 token 并回登录页（用 location 跳转避免循环依赖 router）
+    // 业务错误 = 真实 HTTP 4xx/5xx；登录态失效：清 token 并回登录页
+    // （用 location 跳转避免循环依赖 router）
     if (err.response?.status === 401) {
       localStorage.removeItem('token')
       if (!window.location.pathname.startsWith('/login')) {
         window.location.href = '/login'
       }
     }
-    // 统一错误体，抛给调用方
+    // 统一错误体（后端保证 body 为 {code,message,data}），抛给调用方
     const body = err.response?.data || { code: 500, message: '网络错误', data: {} }
     return Promise.reject(body)
   },

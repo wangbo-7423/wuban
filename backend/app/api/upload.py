@@ -53,13 +53,13 @@ def _validate_and_read(file: UploadFile) -> tuple[bytes, str]:
     """读取并校验文件，返回 (原始字节, 推断扩展名)。失败抛 BizError。"""
     data = file.file.read()
     if len(data) == 0:
-        raise BizError(ErrorCode.PARAM_INVALID, "空文件")
+        raise BizError(ErrorCode.BAD_REQUEST, "空文件")
     if len(data) > settings.max_image_bytes:
         mb = settings.max_image_bytes // (1024 * 1024)
-        raise BizError(ErrorCode.PARAM_INVALID, f"图片超过 {mb}MB 上限")
+        raise BizError(ErrorCode.BAD_REQUEST, f"图片超过 {mb}MB 上限")
     ext = _sniff_ext(data[:16])
     if ext is None:
-        raise BizError(ErrorCode.PARAM_INVALID, "不支持的图片格式（仅 PNG/JPEG/WEBP）")
+        raise BizError(ErrorCode.BAD_REQUEST, "不支持的图片格式（仅 PNG/JPEG/WEBP）")
     return data, ext
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from app.api.student import _history_to_messages
+from app.api.student.support import history_to_messages
 
 
 def _msg(role: str, text: str, payload: dict | None = None):
@@ -16,7 +16,7 @@ class TestHistoryToMessages:
             _msg("user", "什么是进程？"),
             _msg("assistant", "进程是…"),
         ]
-        out = _history_to_messages(msgs)
+        out = history_to_messages(msgs)
         assert out == [
             {"role": "user", "content": "什么是进程？"},
             {"role": "assistant", "content": "进程是…"},
@@ -27,17 +27,17 @@ class TestHistoryToMessages:
             _msg("system", "内部消息"),
             _msg("user", "问题"),
         ]
-        out = _history_to_messages(msgs)
+        out = history_to_messages(msgs)
         assert len(out) == 1
 
     def test_limit_keeps_latest(self):
         msgs = [_msg("user", f"m{i}") for i in range(12)]
-        out = _history_to_messages(msgs, limit=8)
+        out = history_to_messages(msgs, limit=8)
         assert len(out) == 8
         assert out[0]["content"] == "m4"
 
     def test_user_images_restored_before_text(self, tmp_path, monkeypatch):
-        # _resolve_image 只认上传目录里真实存在的文件；造一个真文件再回放
+        # resolve_image 只认上传目录里真实存在的文件；造一个真文件再回放
         from app.core.config import settings
 
         upload_dir = tmp_path / "uploads"
@@ -52,7 +52,7 @@ class TestHistoryToMessages:
                 payload={"meta": {"images": [{"url": "/api/uploads-image/a.png"}]}},
             ),
         ]
-        out = _history_to_messages(msgs)
+        out = history_to_messages(msgs)
         content = out[0]["content"]
         assert isinstance(content, list)
         assert content[0]["type"] == "image_url"
@@ -68,7 +68,7 @@ class TestHistoryToMessages:
                 payload={"meta": {"images": [{"url": "/api/uploads-image/ghost.png"}]}},
             ),
         ]
-        out = _history_to_messages(msgs)
+        out = history_to_messages(msgs)
         assert out[0]["content"] == "看这道题"
 
     def test_assistant_payload_images_ignored(self):
@@ -80,5 +80,5 @@ class TestHistoryToMessages:
                 payload={"meta": {"images": [{"url": "/api/uploads-image/a.png"}]}},
             ),
         ]
-        out = _history_to_messages(msgs)
+        out = history_to_messages(msgs)
         assert out[0]["content"] == "收到"

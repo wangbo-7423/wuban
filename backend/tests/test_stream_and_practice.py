@@ -7,7 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 from app.agent.orchestrator import AgentOrchestrator, _accumulate_tool_deltas
-from app.api.student import _options_block, _sse
+from app.api.student.chat import _sse
+from app.api.student.practice import options_block
 
 
 def _chunk(content=None, reasoning=None, tool_calls=None, usage=None):
@@ -106,10 +107,10 @@ class TestOptionsBlock:
             {"value": "A", "label": "进程是资源分配单位"},
             {"value": "B", "label": "进程是调度单位"},
         ]}
-        out = _options_block(payload, "B")
+        out = options_block(payload, "B")
         assert "← 学生选择" in out
         assert out.index("B") < out.index("A") or "A" in out
 
     def test_empty_payload(self):
-        assert _options_block(None, "A") == ""
-        assert _options_block({}, "A") == ""
+        assert options_block(None, "A") == ""
+        assert options_block({}, "A") == ""

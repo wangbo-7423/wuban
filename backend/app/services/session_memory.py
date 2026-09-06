@@ -61,12 +61,16 @@ _COMPRESS_TMPL = """<既有摘要>
 输出合并后的完整摘要。"""
 
 
-def after_turn(conversation_id: str) -> None:
-    """轮后入口（BackgroundTasks 调用）：更新草稿纸 → 视情况压缩摘要。"""
+def after_turn(conversation_id: str, hit_concepts: list[str] | None = None) -> None:
+    """轮后入口（BackgroundTasks 调用）：更新草稿纸 → 推进学习状态 → 视情况压缩摘要。"""
     try:
         _update_scratchpad(conversation_id)
     except Exception:  # noqa: BLE001
         logger.exception("Scratchpad 更新失败 conv=%s（不影响主链路）", conversation_id)
+    try:
+        _update_learning_state(conversation_id, hit_concepts or [])
+    except Exception:  # noqa: BLE001
+        logger.exception("学习状态更新失败 conv=%s（不影响主链路）", conversation_id)
     try:
         _maybe_compress(conversation_id)
     except Exception:  # noqa: BLE001
@@ -83,9 +87,14 @@ def _update_scratchpad(conversation_id: str) -> dict[str, Any] | None:
         if conv is None:
             return None
         pad = _scratchpad_from_messages(chat_repo.list_messages(db, conversation_id))
-        conv.scratchpad = pad
+        # learning_state 是独立维护的键（docs/17），草稿纸整体重建时必须保留
+        merged = dict(pad) if pad else {}
+        prev_state = (conv.scratchpad or {}).get("learning_state")
+        if prev_state is not None:
+            merged["learning_state"] = prev_state
+        conv.scratchpad = merged or None
         db.commit()
-        return pad
+        return merged or None
     finally:
         db.close()
 
@@ -155,6 +164,131 @@ def _pending_text(m: Any) -> str | None:
     if text.endswith(("？", "?")):
         return f"结尾抛了疑问，等学生接：{text[-60:]}"
     return None
+
+
+# ── 学习状态层：按概念键控的跨轮卡壳信号（docs/17，纯逻辑零 LLM）──
+#
+# 与 scratchpad/summary 回答的问题不同：那两层是「我们聊到哪了」（连续性），
+# 这里是「学生在哪个概念上反复磕绊」（风险追踪）。key 用 kg_lookup 命中的
+# 规范化节点名做精确匹配——跨话题安全靠结构（概念对不上就不触发），
+# 不靠模型读散文猜相关性。
+
+
+_LEARNING_WINDOW = 5  # streak 断更多少轮后移出窗口（docs/17 §7.1 初版取向）
+
+
+def advance_learning_state(
+    state: dict[str, Any] | None,
+    hit_concepts: list[str],
+    *,
+    window: int = _LEARNING_WINDOW,
+) -> dict[str, Any]:
+    """纯函数：一轮结束后推进学习状态（有单测守门，tests/test_learning_state.py）。
+
+    hit_concepts 是本轮 kg_lookup 命中的节点名（去重保序）；KG 未收录的
+    概念不进列表（docs/17 §7.3——键控价值在精确匹配）。streak 语义：该概念
+    出现在窗口内的轮数，每命中一轮 +1；无命中轮次只推进 round（streak 冻结，
+    靠窗口淘汰退场）。
+    """
+    state = dict(state or {})
+    rnd = int(state.get("round") or 0) + 1
+    stuck = {
+        str(c["concept"]): dict(c)
+        for c in (state.get("stuck_concepts") or [])
+        if isinstance(c, dict) and c.get("concept")
+    }
+    # 窗口淘汰：断更超过 window 轮的概念退场（学生换话题且没再回来）
+    stuck = {
+        c: v for c, v in stuck.items() if rnd - int(v.get("last_round") or 0) <= window
+    }
+    hits = list(dict.fromkeys(h for h in hit_concepts if h))
+    for concept in hits:
+        v = stuck.get(concept) or {"concept": concept, "streak": 0, "last_round": 0}
+        v["streak"] = int(v["streak"]) + 1
+        v["last_round"] = rnd
+        stuck[concept] = v
+    state.update({
+        "round": rnd,
+        "current_topic": hits[-1] if hits else state.get("current_topic"),
+        "stuck_concepts": sorted(
+            stuck.values(), key=lambda v: (-int(v["streak"]), -int(v["last_round"]))
+        ),
+        "new_concepts_last_round": len(hits),  # docs/17 §7.2 初版：数工具命中数
+    })
+    return state
+
+
+def render_learning_context(
+    state: dict[str, Any] | None,
+    pending: str | None,
+    hit_concepts: list[str],
+) -> str:
+    """切卡侧的跨轮信号渲染（docs/17 §5.2）：结构化状态 + 确定性规则判定。
+
+    state 是截至上一轮的状态；hit_concepts 是本轮命中。规则只产出「建议」，
+    发卡与否、措辞仍归切卡模型（docs/17 §4 的分工：规则管触发，模型管措辞）。
+    返回空串表示无可注入。
+    """
+    hits = list(dict.fromkeys(h for h in hit_concepts if h))
+    stuck = {
+        str(c["concept"]): int(c.get("streak") or 0)
+        for c in (state or {}).get("stuck_concepts") or []
+        if isinstance(c, dict) and c.get("concept")
+    }
+    if not stuck and not hits and not pending:
+        return ""
+
+    lines: list[str] = ["## 学习状态（跨轮，按概念追踪）"]
+    topic = (state or {}).get("current_topic")
+    if topic:
+        lines.append(f"- 当前话题：{topic}")
+    if stuck:
+        lines.append(
+            "- 卡壳概念：" + "、".join(f"{c}（连续 {s} 轮）" for c, s in stuck.items())
+        )
+    if pending:
+        lines.append(f"- 上一轮遗留疑问：{pending}")
+    prev_new = int((state or {}).get("new_concepts_last_round") or 0)
+    if prev_new:
+        lines.append(f"- 上一轮引入新概念数：{prev_new}")
+    if hits:
+        lines.append(f"- 本轮命中的概念：{'、'.join(hits)}")
+
+    # 规则判定（docs/17 §4）：eff = 既往 streak + 本轮命中 1 次
+    verdicts: list[str] = []
+    for c in hits:
+        eff = stuck.get(c, 0) + 1
+        if eff >= 3:
+            verdicts.append(f"「{c}」已连续 {eff} 轮出现 → 建议发「负荷过高」warning")
+        elif eff == 2:
+            verdicts.append(f"「{c}」本轮再次出现（累计 {eff} 轮）→ 建议发「前置缺失」warning")
+    if len(hits) >= 3:
+        verdicts.append(f"本轮一次命中 {len(hits)} 个概念 → 建议发「负荷过高」warning")
+    if verdicts:
+        lines.append("系统规则判定（触发 = 建议发卡，是否发、如何措辞仍由你定）：")
+        lines.extend(f"- {v}" for v in verdicts)
+    return "\n".join(lines)
+
+
+def _update_learning_state(conversation_id: str, hit_concepts: list[str]) -> None:
+    """advance 的 DB 包装：读 scratchpad.learning_state → 推进 → 合并写回。
+
+    与 _update_scratchpad 各自整档写 scratchpad，顺序上它先重建（保留本键）、
+    本函数后推进，两者都兜异常（after_turn），任何一路挂了不影响主链路。
+    """
+    db = SessionLocal()
+    try:
+        conv = db.get(Conversation, conversation_id)
+        if conv is None:
+            return
+        pad = dict(conv.scratchpad or {})
+        pad["learning_state"] = advance_learning_state(
+            pad.get("learning_state"), hit_concepts
+        )
+        conv.scratchpad = pad
+        db.commit()
+    finally:
+        db.close()
 
 
 # ── 短期记忆层：滚动压缩摘要（LLM）───────────────────────────

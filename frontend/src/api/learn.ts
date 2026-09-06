@@ -83,9 +83,9 @@ export async function streamChat(
     throw Object.assign(new Error(message), { code: res.status })
   }
 
-  // 后端把业务异常包成 HTTP 200 + JSON 信封（biz 处理器），SSE 端点在开始
-  // 吐流之前失败（鉴权过期/参数校验/模型不可用）时返回的就是它——
-  // content-type 不是 text/event-stream。按信封语义处理，而不是当流读：
+  // SSE 端点在开始吐流之前失败（鉴权过期/参数校验/模型不可用）时返回统一
+  // JSON 错误体（现在带真实 4xx/5xx 状态码，上面 !res.ok 已拦大半）——
+  // content-type 不是 text/event-stream。按错误体处理，而不是当流读：
   // 否则 0 帧「正常结束」→ 报「AI 未返回完整回答」，且登录态过期不会跳登录页，
   // 用户看到的就是「发送后咔嚓一下弹出错误/毫无反应」，完全没有流式过程。
   const ct = res.headers.get('content-type') || ''
@@ -96,7 +96,7 @@ export async function streamChat(
     } catch {
       /* 非 JSON 体，走通用文案 */
     }
-    if (body?.code === 401) {
+    if (body?.code === 401 || res.status === 401) {
       localStorage.removeItem('token')
       if (!window.location.pathname.startsWith('/login')) {
         window.location.href = '/login'
